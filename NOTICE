@@ -1,0 +1,15 @@
+plugmatic — third-party acknowledgements
+
+Protocol/format documentation sources (facts extracted into docs/formats/; no code
+copied or translated):
+
+- DM-32UV Protocol Documentation (github.com/infamy/DM32-Protocol-Spec), MIT License.
+  tests/fixtures/captures/cps_session_example.txt is copied from that project's
+  serial_capture_example.txt under the MIT license.
+- qdmr (github.com/hmatuschek/qdmr), GPL-3.0, consulted as a reference for protocol
+  and format FACTS ONLY under the discipline documented in the implementation spec
+  §3.2 and docs/formats/*. No qdmr code is included in, copied into, translated,
+  or ported to this repository.
+
+Data:
+- US ZIP centroid table derived from GeoNames (geonames.org), CC-BY 4.0.

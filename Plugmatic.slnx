@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Plugmatic.Cli/Plugmatic.Cli.csproj" />
+    <Project Path="src/Plugmatic.Core/Plugmatic.Core.csproj" />
+    <Project Path="src/Plugmatic.Location/Plugmatic.Location.csproj" />
+    <Project Path="src/Plugmatic.Providers/Plugmatic.Providers.csproj" />
+    <Project Path="src/Plugmatic.Radios.Dm32uv/Plugmatic.Radios.Dm32uv.csproj" />
+    <Project Path="src/Plugmatic.Radios/Plugmatic.Radios.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Plugmatic.Tests/Plugmatic.Tests.csproj" />
+  </Folder>
+</Solution>
