@@ -45,7 +45,7 @@ public static class BuildCommand
                 Console.WriteLine($"{repeaters.Count} repeaters in range.");
 
                 var (gmrsEnabled, ack) = GmrsPolicyStore.Get();
-                var builder = new CodeplugBuilder(Dm32uvCodec.Instance.Capabilities);
+                var builder = new CodeplugBuilder(Dm32uvCodec.Instance.Capabilities);   // settings read from config
                 var result = builder.Build(repeaters, profile, new GmrsPolicy(gmrsEnabled, ack));
 
                 var errors = CodeplugValidator.Validate(result.Codeplug, Dm32uvCodec.Instance.Capabilities);

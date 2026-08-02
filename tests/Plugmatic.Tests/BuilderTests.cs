@@ -33,9 +33,9 @@ public class BuilderTests
         },
     ];
 
-    private static BuildResult BuildWith(bool gmrsTx)
+    private static BuildResult BuildWith(bool gmrsTx, uint dmrId = 3217632)
     {
-        var builder = new CodeplugBuilder(Caps);
+        var builder = new CodeplugBuilder(Caps, new GeneralSettings { RadioId = dmrId, Callsign = "TEST" });
         return builder.Build(SampleRepeaters(), BuildProfile.ColoradoDefault(),
             new GmrsPolicy(gmrsTx, gmrsTx ? "2026-08-01T00:00:00Z" : null));
     }
@@ -49,13 +49,28 @@ public class BuilderTests
     }
 
     [Fact]
-    public void Noaa_zone_present_and_rx_only()
+    public void Noaa_zone_present_rx_only_and_wideband()
     {
         var plug = BuildWith(gmrsTx: true).Codeplug;   // even with GMRS ack, NOAA stays inhibited (I4)
         var zone = plug.Zones.Single(z => z.Name == "NOAA WX");
         Assert.Equal(7, zone.ChannelNames.Count);
         foreach (var name in zone.ChannelNames)
-            Assert.Equal(TxPermit.Inhibited, plug.FindChannel(name)!.TxPermit);
+        {
+            var ch = (AnalogChannel)plug.FindChannel(name)!;
+            Assert.Equal(TxPermit.Inhibited, ch.TxPermit);
+            Assert.True(ch.WideBandwidth);             // NOAA is wide-FM (user-verified on air)
+        }
+    }
+
+    [Fact]
+    public void Every_dmr_repeater_gets_a_parrot_channel()
+    {
+        var plug = BuildWith(gmrsTx: false).Codeplug;
+        var parrot = plug.Channels.OfType<DigitalChannel>()
+            .Where(c => c.TxContactName == "Parrot").ToList();
+        Assert.Single(parrot);                          // one DMR repeater in the sample
+        Assert.Equal(TimeSlot.TS2, parrot[0].TimeSlot);
+        Assert.Equal(CallType.Private, plug.FindContact("Parrot")!.Type);
     }
 
     [Fact]
@@ -130,5 +145,48 @@ public class BuilderTests
     {
         var plug = BuildWith(gmrsTx: false).Codeplug;
         Assert.NotNull(plug.FindChannel("145115 W0UPS"));
+    }
+
+    [Fact]
+    public void Blank_callsign_defaults_to_the_dmr_id_digits()
+    {
+        var builder = new CodeplugBuilder(Caps, new GeneralSettings { RadioId = 3217632, Callsign = "" });
+        var plug = builder.Build(SampleRepeaters(), BuildProfile.ColoradoDefault(),
+            new GmrsPolicy(false, null)).Codeplug;
+        Assert.Equal("3217632", plug.Settings.Callsign);
+    }
+
+    [Fact]
+    public void Without_dmr_id_every_dmr_channel_is_rx_only()
+    {
+        var result = BuildWith(gmrsTx: false, dmrId: 0);
+        var dmr = result.Codeplug.Channels.OfType<DigitalChannel>().ToList();
+        Assert.NotEmpty(dmr);
+        Assert.All(dmr, c => Assert.Equal(TxPermit.Inhibited, c.TxPermit));
+        Assert.Contains(result.Notes, n => n.Contains("dmr.id"));
+        Assert.Empty(CodeplugValidator.Validate(result.Codeplug, Caps));
+    }
+
+    [Fact]
+    public void Validator_rejects_dmr_tx_without_radio_id()
+    {
+        var plug = BuildWith(gmrsTx: false).Codeplug;
+        plug.Settings.RadioId = 0;   // TX-enabled DMR channels but no ID
+        var errors = CodeplugValidator.Validate(plug, Caps);
+        Assert.Contains(errors, e => e.Contains("dmr.id"));
+    }
+
+    [Fact]
+    public void Encode_without_radio_id_leaves_radio_id_block_untouched()
+    {
+        // The ladder-step-6 regression: a plug without an ID must never zero the radio's own.
+        var codec = Dm32uvCodec.Instance;
+        var baseImage = codec.Encode(CodecRoundTripTests.SampleIr());   // has ID 3121234 'W0XYZ'
+        var idBlockBefore = baseImage.AsSpan(0x67000, 0x1000).ToArray();
+
+        var newPlug = BuildWith(gmrsTx: false, dmrId: 0).Codeplug;
+        var written = codec.Encode(newPlug, baseImage);
+        Assert.Equal(idBlockBefore, written.AsSpan(0x67000, 0x1000).ToArray());
+        Assert.Equal(3121234u, codec.Decode(written).Settings.RadioId);
     }
 }

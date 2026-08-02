@@ -9,7 +9,7 @@ public interface ICodeplugBuilder
 }
 
 /// <summary>Repeaters + profile + policy -> IR. Enforces I4/I5 by construction. [spec §6.3]</summary>
-public sealed class CodeplugBuilder(RadioCapabilities caps) : ICodeplugBuilder
+public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? settings = null) : ICodeplugBuilder
 {
     /// <summary>GMRS main channels 15-22 (repeater outputs / simplex). [spec §6.3.3]</summary>
     private static readonly (int Num, decimal MHz)[] GmrsMain =
@@ -38,13 +38,15 @@ public sealed class CodeplugBuilder(RadioCapabilities caps) : ICodeplugBuilder
         var names = new HashSet<string>(StringComparer.Ordinal);
         var zones = new Dictionary<string, Zone>(StringComparer.Ordinal);
 
-        // Settings from config (radio keeps its own ID when unset — encode-over-base behaviour).
-        var cfg = ConfigStore.Load();
-        if (uint.TryParse(cfg.GetValueOrDefault("dmr.id"), out var dmrId)) plug.Settings.RadioId = dmrId;
-        plug.Settings.Callsign = cfg.GetValueOrDefault("dmr.callsign") ?? "";
-        if (plug.Settings.RadioId == 0)
-            notes.Add("dmr.id not configured — the radio's existing DMR ID is kept on write " +
-                      "(plugmatic config set dmr.id <id>).");
+        // Operator identity: from injected settings, else config. Without a DMR ID, ALL DMR
+        // channels are forced RX-only — an unidentified radio must not transmit digital.
+        plug.Settings = settings ?? LoadSettingsFromConfig();
+        if (plug.Settings.RadioId != 0 && plug.Settings.Callsign.Length == 0)
+            plug.Settings.Callsign = plug.Settings.RadioId.ToString();   // radio shows the ID as its name
+        bool dmrTxAllowed = plug.Settings.RadioId != 0;
+        if (!dmrTxAllowed)
+            notes.Add("No DMR ID configured — every DMR channel is RX-only. " +
+                      "Enable DMR transmit with: plugmatic config set dmr.id <your id>");
 
         // Contacts from profile talkgroups (in profile order: TX-contact slots stay <= 255).
         foreach (var tg in profile.Talkgroups)
@@ -98,7 +100,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps) : ICodeplugBuilder
             foreach (var r in ordered.Where(r => r.Service == RepeaterService.Ham && r.Mode != RepeaterMode.Fm && UsableInput(r)))
             {
                 var slots = TalkgroupsFor(r, profile);
-                foreach (var (tg, slot) in slots.Take(profile.MaxTalkgroupsPerRepeater))
+                foreach (var (tg, slot) in slots)
                 {
                     var contactName = EnsureContact(plug, tg, notes);
                     if (contactName is null) continue;
@@ -107,6 +109,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps) : ICodeplugBuilder
                         Name = DigitalName(r, contactName, names),
                         RxFrequency = r.Output,
                         TxFrequency = r.Input,
+                        TxPermit = dmrTxAllowed ? TxPermit.Allowed : TxPermit.Inhibited,
                         Power = PowerLevel.High,
                         ColorCode = r.ColorCode ?? 1,
                         TimeSlot = slot == 2 ? TimeSlot.TS2 : TimeSlot.TS1,
@@ -175,7 +178,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps) : ICodeplugBuilder
                     TxFrequency = Frequency.FromMHz(mhz),
                     TxPermit = TxPermit.Inhibited,             // I4: no acknowledgment path exists
                     Power = PowerLevel.Low,
-                    WideBandwidth = false,
+                    WideBandwidth = true,                      // NOAA deviation is wide-FM (user-verified on air)
                 };
                 names.Add(ch.Name);
                 plug.Channels.Add(ch);
@@ -205,21 +208,35 @@ public sealed class CodeplugBuilder(RadioCapabilities caps) : ICodeplugBuilder
 
     // ---------------------------------------------------------------- helpers
 
-    private List<(uint Tg, int Slot)> TalkgroupsFor(Repeater r, BuildProfile profile)
+    private static GeneralSettings LoadSettingsFromConfig()
     {
-        // BrandMeister static talkgroups first (authoritative slots), then profile defaults.
+        var cfg = ConfigStore.Load();
+        var s = new GeneralSettings { Callsign = cfg.GetValueOrDefault("dmr.callsign") ?? "" };
+        if (uint.TryParse(cfg.GetValueOrDefault("dmr.id"), out var dmrId)) s.RadioId = dmrId;
+        return s;
+    }
+
+    private static List<(uint Tg, int Slot)> TalkgroupsFor(Repeater r, BuildProfile profile)
+    {
+        // Static talkgroups first (authoritative slots), then group profile talkgroups, with
+        // the fan-out cap applied to those; private profile talkgroups (Parrot) are appended
+        // AFTER the cap so every repeater keeps its TX/RX self-test channel (user requirement).
         var result = new List<(uint, int)>();
         foreach (var (tg, slot) in r.StaticTalkgroups)
             result.Add((tg, slot));
         foreach (var tg in profile.Talkgroups.Where(t => !t.Private))
             if (!result.Any(x => x.Item1 == tg.Id))
                 result.Add((tg.Id, tg.Slot));
-        return result;
+        var capped = result.Take(profile.MaxTalkgroupsPerRepeater).ToList();
+        foreach (var tg in profile.Talkgroups.Where(t => t.Private))
+            if (!capped.Any(x => x.Item1 == tg.Id))
+                capped.Add((tg.Id, tg.Slot));
+        return capped;
     }
 
     private static string? EnsureContact(Codeplug plug, uint tgId, List<string> notes)
     {
-        var existing = plug.Contacts.FirstOrDefault(c => c.DmrId == tgId && c.Type == CallType.Group);
+        var existing = plug.Contacts.FirstOrDefault(c => c.DmrId == tgId);
         if (existing is not null) return existing.Name;
         var name = Fit($"TG{tgId}", 16);
         if (plug.Contacts.Count >= 250)

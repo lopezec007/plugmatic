@@ -133,6 +133,12 @@ public static class CodeplugValidator
         foreach (var c in plug.Contacts.Where(c => c.DmrId == 0 || c.DmrId > 0xFFFFFF))
             Err($"contact '{c.Name}': DMR ID {c.DmrId} out of 24-bit range");
 
+        // An unidentified radio must not transmit digital: DMR TX requires an operator DMR ID.
+        if (plug.Settings.RadioId == 0
+            && plug.Channels.OfType<DigitalChannel>().Any(c => c.TxPermit == TxPermit.Allowed))
+            Err("DMR channels with TX enabled but no DMR ID set — configure it with " +
+                "'plugmatic config set dmr.id <your id>' or make the channels RX-only");
+
         return errors;
     }
 

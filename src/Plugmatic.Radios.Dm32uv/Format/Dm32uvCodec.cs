@@ -370,12 +370,15 @@ public sealed class Dm32uvCodec : IRadioCodec
 
     private static void EncodeRadioIds(Dm32Image img, Codeplug ir)
     {
-        if (ir.Settings.RadioId == 0 && !img.BlockPresent(Layout.RadioIdBlock)) return;
+        // No ID in the IR -> leave the radio's own ID list completely untouched. Writing a
+        // zero ID silently breaks all DMR TX (learned the hard way at ladder step 6).
+        if (ir.Settings.RadioId == 0) return;
         var block = img.Block(Layout.RadioIdBlock);                          // [format §10]
         if (block[0x00] < 1) block[0x00] = 1;                                // count; extra entries preserved from canvas
         var rec = block.Slice(Layout.RadioIdsOffset, Layout.RadioIdRecordSize);
         SetU24(rec, 0x00, ir.Settings.RadioId);
-        SetNameIfChanged(rec.Slice(0x03, 12), ir.Settings.Callsign);
+        if (ir.Settings.Callsign.Length > 0)
+            SetNameIfChanged(rec.Slice(0x03, 12), ir.Settings.Callsign);
     }
 
     private static void EncodeScanLists(Dm32Image img, Codeplug ir, Dictionary<string, int> channelIndexByName)
