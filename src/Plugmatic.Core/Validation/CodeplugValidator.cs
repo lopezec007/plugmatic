@@ -95,14 +95,16 @@ public static class CodeplugValidator
         {
             if (g.ContactNames.Count > caps.MaxContactsPerGroupList)
                 Err($"group list '{g.Name}': {g.ContactNames.Count} members exceed {caps.MaxContactsPerGroupList}");
-            foreach (var cn in g.ContactNames.Where(cn => !contactNames.Contains(cn)))
+            // "TG<id>" pseudo-names denote raw talkgroup IDs with no contact entry — legal on the wire.
+            foreach (var cn in g.ContactNames.Where(cn => !contactNames.Contains(cn) && !IsRawTalkgroupRef(cn)))
                 Err($"group list '{g.Name}': unknown contact '{cn}'");
         }
         foreach (var s in plug.ScanLists)
         {
             if (s.ChannelNames.Count > caps.MaxChannelsPerScanList)
                 Err($"scan list '{s.Name}': {s.ChannelNames.Count} channels exceed {caps.MaxChannelsPerScanList}");
-            foreach (var cn in s.ChannelNames.Where(cn => !channelNames.Contains(cn)))
+            // "@current" is the radio's current-channel member marker, not a channel reference.
+            foreach (var cn in s.ChannelNames.Where(cn => cn != "@current" && !channelNames.Contains(cn)))
                 Err($"scan list '{s.Name}': unknown channel '{cn}'");
         }
 
@@ -130,4 +132,8 @@ public static class CodeplugValidator
 
         return errors;
     }
+
+    public static bool IsRawTalkgroupRef(string name) =>
+        name.StartsWith("TG", StringComparison.Ordinal)
+        && uint.TryParse(name.AsSpan(2), out uint id) && id is > 0 and <= 0xFFFFFF;
 }

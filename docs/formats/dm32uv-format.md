@@ -140,21 +140,17 @@ set. Additionally the builder emits no TX frequency… no — TX frequency stays
 2-byte records; **2047 per block** (offsets 0x000–0xFFD; the block's last two bytes
 are padding + metadata). Channel `i`: block `0x42 + i/2047`, offset `(i%2047)*2`.
 
-Record encoding (the infamous mixed-endian hotfix):
+Record encoding — **hw-verified** against factory-golden (all 25 DMR channels):
 
-- byte 0, bits 3–0 ("MSN"): bits 11–8 of a 12-bit value
-- byte 1 ("LSB"): bits 7–0 of the value
-- byte 0, bits 7–4: unknown/zero
-- The 12-bit value is the **1-based contact index** (into §6 contacts, global index);
-  **0 = no TX contact**.
-- A cleared record is `01 00` — i.e. u16 LE 0x0001 with the contact index then
-  cleared to 0. Observed cleared state: byte0=0x01&0xF0? qdmr clears to
-  `setUInt16_le(0,0x0001)` then zeroes the index nibble+byte, leaving 0x0000.
-  Net effect: absent contact = `00 00`. (verified: pending — check on hw read)
+- byte 0: **0x01** on DMR channels ("assigned" flag), **0x00** on FM channels.
+- byte 1: **1-based contact slot** (u8, into §6 contact table); **0 = no contact**.
+- Examples from our radio: 'Colorado' (slot 6) → `01 06`; 'Parrot' (slot 16) → `01 10`.
+- qdmr's 12-bit MSN/LSB reading mis-parses these (0x0101 ≠ slot 1); its `0x0001`
+  clear value is really flag=1 + slot=0.
+- **Open**: behaviour for contact slots > 255 is unknown (byte 0 may carry high bits).
+  The codec refuses to encode TX-contact slots > 255 until resolved. (§12 C5b)
 
-(source: qdmr-observed; dm32-spec confirms blocks 0x42/0x43 are "TX contact,
-2 B/channel, ch 1–2048 / 2049+"; verified: cross on purpose+stride, pending on the
-exact split 2047 vs 2048 — qdmr's 2047 wins until hw says otherwise, §12 C5)
+(source: hw factory-golden; verified: hw. Block split 2047 vs 2048 still pending, C5)
 
 ## 6. Contacts
 
@@ -179,25 +175,35 @@ type=0x16; verified: pending vs cps-diff)
 
 ### 6.2 Contact index (block 0x0B)
 
+Blank state of this entire block is **0xFF** (hw-verified against factory-golden read
+of our radio, fw DM32.NRF.01.049).
+
 | Off | Field |
 |---|---|
 | 0x000 | u16 LE total contact count |
 | 0x002 | u16 LE group-call count |
-| 0x004 | u16 LE private-call count |
-| 0x010 | Allocation bitmap, 100 bytes (800 bits), **inverted polarity**: bit cleared = slot allocated; blank = 0xFF |
-| 0x100 | Index table: 800 × u16 LE entries, in contact-slot order |
-| 0x740 | Sorted index table: same 800 × u16 LE entries, sorted ascending by DMR ID |
+| 0x004 | u8, observed 0x00 — **not** a private-call count (radio with 1 private call stores 0 here; qdmr's "privateCount@4" is contradicted by hw). Write 0x00. |
+| 0x005–0x00F | 0xFF fill |
+| 0x010 | Allocation bitmap, 100 bytes (800 bits), **inverted polarity**: bit cleared = slot allocated; blank = 0xFF (hw-verified) |
+| 0x074–0x0FF | 0xFF fill |
+| 0x100 | Index table: u16 LE entries **ordered by contact name (ordinal ASCII sort)** — hw-verified; qdmr's slot-order claim is wrong |
+| 0x740 | Sorted index table: u16 LE entries ordered ascending by DMR ID (hw-verified) |
 
-Index entry: bits 15–12 = call type (3/4/5 as §6.1); bits 11–0 = **1-based** contact
-slot; 0xFFFF = empty. (source: qdmr-observed; verified: pending)
+Index entry: bits 15–12 = call type (3 private / 4 group / 5 all — 3=private confirmed
+by hw: 'Parrot' 9990 carries type 3); bits 11–0 = **1-based** contact slot;
+0xFFFF = empty. (source: qdmr-observed + hw factory-golden; verified: hw)
 
-The codec must regenerate this entire block from the contact table on encode.
+The codec regenerates this entire block from the contact table on encode. Note the
+neighbouring group-list block (0x0F) blank-fills with **0x00**, not 0xFF — fill
+conventions are per-block (hw-verified via writeback gate).
 
 ## 7. RX group lists (block 0x0F)
 
 Bank header: 4-byte allocation bitmap at +0x00 (bit set = list present, normal
-polarity), lists start at **+0x11**; **109-byte (0x6D)** records, stride 0x6D,
-max 32 lists.
+polarity, hw-verified: 5 lists → 0x0000001F); byte **+0x10 observed 0x01** —
+presumed selected-list indicator, preserve on rewrite (hw-verified); lists start at
+**+0x11**; **109-byte (0x6D)** records, stride 0x6D (hw-verified: records at +0x11,
++0x7E, +0xEB), max 32 lists. Blank areas in this block are **0x00**-filled.
 
 | Off | Field |
 |---|---|
@@ -213,7 +219,8 @@ given a one-byte base shift; verified: cross-weak, confirm at hw)
 Bank: u8 count at +0x00; **57-byte (0x39)** records from **+0x01**, stride 0x39, max
 31. Bank tail: scan mode u8 @+0xE00 (0 time, 1 carrier, 2 search), VHF range lower/
 upper u16 @+0xE01/+0xE03, UHF lower/upper u16 @+0xE05/+0xE07 (units unknown — treat
-as opaque defaults; §12 C7).
+as opaque defaults; §12 C7). The member array holds **16 entries** (0x18–0x37, 32
+bytes) — hw-verified ('GMRS Smplx' carries count 16); qdmr's 15 is wrong.
 
 | Off | Field |
 |---|---|
@@ -225,10 +232,15 @@ as opaque defaults; §12 C7).
 | 0x0F | u16 LE revert ("designated TX") channel number, 1-based |
 | 0x11–0x17 | unknown (dm32-spec: more channel refs, "stored −2"; C8) |
 | 0x15 | bits ≥2: priority sweep time (qdmr) |
-| 0x18 | 15 × u16 LE channel numbers; **0 = "current channel"** marker, else 1-based |
+| 0x18 | 15 × u16 LE channel numbers; **0 = "current channel"** marker (counts as a member!), else 1-based |
+
+hw-verified semantics (factory-golden, CPS-written): the count byte at 0x0B includes
+the current-channel marker; slots **beyond the count contain stale bytes** the CPS
+never cleared — byte-faithful re-encode must preserve them and let the count govern.
+Example from our radio: count 12 = marker + channels 17–27, slots 12–14 stale.
 
 v1 builder only writes: name, count, channel list, mode bytes zeroed-to-defaults.
-(source: qdmr-observed + dm32-spec; verified: cross on name/count/list, C8 else)
+(source: qdmr-observed + dm32-spec + hw; verified: hw for name/count/list/marker, C8 else)
 
 ## 9. General settings (block 0x04, +0x000, 256 B) — decoded subset
 

@@ -55,8 +55,11 @@ public sealed class Dm32uvCodec : IRadioCodec
         // Scan lists reference channels by 1-based number; resolve after channels exist. [format §8]
         for (int i = 0; i < ir.ScanLists.Count; i++)
             foreach (var num in scanChannelNumbers[i])
-                if (num >= 1 && num <= ir.Channels.Count)
+            {
+                if (num == 0) ir.ScanLists[i].ChannelNames.Add(CurrentChannelMarker);
+                else if (num >= 1 && num <= ir.Channels.Count)
                     ir.ScanLists[i].ChannelNames.Add(ir.Channels[num - 1].Name);
+            }
 
         return ir;
     }
@@ -95,20 +98,30 @@ public sealed class Dm32uvCodec : IRadioCodec
             {
                 uint id = GetU24(rec, 0x0B + n * 3);
                 if (id == 0) continue;
-                gl.ContactNames.Add(ResolveOrCreateGroupContact(ir, id));
+                gl.ContactNames.Add(ResolveGroupContactName(ir, id));
             }
             ir.RxGroupLists.Add(gl);
         }
     }
 
-    /// <summary>Group lists store DMR IDs, not indices; map to contact names, creating a contact if the radio lacks one.</summary>
-    private static string ResolveOrCreateGroupContact(Codeplug ir, uint dmrId)
+    /// <summary>
+    /// Group lists store DMR IDs, not indices. IDs with a matching group contact map to its
+    /// name; anything else becomes the pseudo-name "TG&lt;id&gt;" WITHOUT inventing a contact
+    /// (the radio's contact table must round-trip untouched — verified against hw read).
+    /// </summary>
+    private static string ResolveGroupContactName(Codeplug ir, uint dmrId)
     {
         var existing = ir.Contacts.FirstOrDefault(c => c.DmrId == dmrId && c.Type == CallType.Group);
-        if (existing is not null) return existing.Name;
-        var created = new Contact { Name = $"TG{dmrId}", Type = CallType.Group, DmrId = dmrId };
-        ir.Contacts.Add(created);
-        return created.Name;
+        return existing?.Name ?? $"TG{dmrId}";
+    }
+
+    /// <summary>Inverse of pseudo-name mapping at encode time.</summary>
+    internal static uint? ResolveGroupMemberId(Codeplug ir, Dictionary<string, int> contactIndexByName, string name)
+    {
+        if (contactIndexByName.TryGetValue(name, out int ci)) return ir.Contacts[ci].DmrId;
+        if (name.StartsWith("TG", StringComparison.Ordinal) && uint.TryParse(name.AsSpan(2), out uint id) && id > 0)
+            return id;
+        return null;
     }
 
     private static void DecodeRadioIds(Dm32Image img, Codeplug ir)
@@ -121,6 +134,9 @@ public sealed class Dm32uvCodec : IRadioCodec
         ir.Settings.RadioId = GetU24(rec, 0x00);
         ir.Settings.Callsign = AsciiField.Read(rec.Slice(0x03, 12));
     }
+
+    /// <summary>Scan-list member marker for the radio's "current channel" slot (wire value 0).</summary>
+    public const string CurrentChannelMarker = "@current";
 
     private static void DecodeScanLists(Dm32Image img, Codeplug ir, out List<List<int>> channelNumbers)
     {
@@ -135,9 +151,9 @@ public sealed class Dm32uvCodec : IRadioCodec
             var numbers = new List<int>();
             int chCount = Math.Min((int)rec[0x0B], Layout.MaxChannelsPerScanList);
             for (int n = 0; n < chCount; n++)
-                numbers.Add(GetU16(rec, 0x18 + n * 2));                      // 0 = "current channel" marker
+                numbers.Add(GetU16(rec, 0x18 + n * 2));   // 1-based; 0 = current-channel member (hw-verified)
             ir.ScanLists.Add(sl);
-            channelNumbers.Add(numbers.Where(x => x != 0).ToList());
+            channelNumbers.Add(numbers);                  // entries beyond count are stale bytes, not members
         }
     }
 
@@ -197,10 +213,10 @@ public sealed class Dm32uvCodec : IRadioCodec
 
     private static string? DecodeTxContact(Dm32Image img, Codeplug ir, int channelIndex)
     {
-        var (block, off) = Layout.ExtensionSlot(channelIndex);               // [format §5]
+        var (block, off) = Layout.ExtensionSlot(channelIndex);               // [format §5, hw-verified]
         if (!img.BlockPresent(block)) return null;
         var rec = img.ReadBlock(block).Slice(off, Layout.ExtensionRecordSize);
-        int idx = GetBits(rec, 0, 0, 4) << 8 | rec[1];                       // 12-bit, 1-based
+        int idx = rec[1];                                                    // byte1 = 1-based contact slot
         if (idx == 0 || idx > ir.Contacts.Count) return null;
         return ir.Contacts[idx - 1].Name;
     }
@@ -282,14 +298,8 @@ public sealed class Dm32uvCodec : IRadioCodec
 
     private static void EncodeContacts(Dm32Image img, Codeplug ir)
     {
-        for (int blockIdx = 0; blockIdx < Layout.ContactBlockCount; blockIdx++)
-        {
-            int block = Layout.FirstContactBlock + blockIdx;
-            bool needed = ir.Contacts.Count > blockIdx * Layout.ContactsPerBlock;
-            if (!needed && !img.BlockPresent(block)) continue;               // never allocate empty banks
-            var span = img.Block(block);
-            span.Clear();
-        }
+        // Counts govern; slots beyond them keep whatever bytes they hold (CPS behaviour,
+        // hw-verified). Only fresh blocks start zeroed (AllocateBlock). [format §4 note]
         for (int i = 0; i < ir.Contacts.Count; i++)
         {
             var (block, off) = Layout.ContactSlot(i);
@@ -304,34 +314,41 @@ public sealed class Dm32uvCodec : IRadioCodec
     {
         if (ir.Contacts.Count == 0 && !img.BlockPresent(Layout.ContactIndexBlock)) return;
         var block = img.Block(Layout.ContactIndexBlock);
-        block.Clear();                                                       // rebuilt wholesale [format §6.2]
+        // Rebuilt wholesale; blank state throughout this block is 0xFF. [format §6.2, hw-verified]
+        block.Fill(0xFF);
         SetU16(block, 0x00, (ushort)ir.Contacts.Count);
         SetU16(block, 0x02, (ushort)ir.Contacts.Count(c => c.Type == CallType.Group));
-        SetU16(block, 0x04, (ushort)ir.Contacts.Count(c => c.Type == CallType.Private));
+        block[0x04] = 0x00;   // NOT a private-call count — radio writes 0 here (hw-verified)
 
         var bitmap = block.Slice(Layout.ContactIndexBitmapOffset, Layout.ContactIndexBitmapSize);
-        bitmap.Fill(0xFF);                                                   // inverted polarity: cleared bit = allocated
         for (int i = 0; i < ir.Contacts.Count; i++)
-            bitmap[i / 8] &= (byte)~(1 << i % 8);
+            bitmap[i / 8] &= (byte)~(1 << i % 8);                            // inverted: cleared bit = allocated
 
         static ushort Entry(Contact c, int slot) => (ushort)(
             (c.Type switch { CallType.Private => 3, CallType.All => 5, _ => 4 }) << 12 | slot + 1 & 0x0FFF);
 
         var table = block[Layout.ContactIndexTableOffset..];
         var sorted = block[Layout.ContactIndexSortedOffset..];
-        var order = Enumerable.Range(0, ir.Contacts.Count).OrderBy(i => ir.Contacts[i].DmrId).ToArray();
+        // Index table: name order (ordinal); 0x740 table: DMR-ID order. [format §6.2, hw-verified]
+        var byName = Enumerable.Range(0, ir.Contacts.Count)
+            .OrderBy(i => ir.Contacts[i].Name, StringComparer.Ordinal).ToArray();
+        var byId = Enumerable.Range(0, ir.Contacts.Count)
+            .OrderBy(i => ir.Contacts[i].DmrId).ToArray();
         for (int i = 0; i < ir.Contacts.Count; i++)
         {
-            SetU16(table, i * 2, Entry(ir.Contacts[i], i));
-            SetU16(sorted, i * 2, Entry(ir.Contacts[order[i]], order[i]));
+            SetU16(table, i * 2, Entry(ir.Contacts[byName[i]], byName[i]));
+            SetU16(sorted, i * 2, Entry(ir.Contacts[byId[i]], byId[i]));
         }
     }
 
     private static void EncodeGroupLists(Dm32Image img, Codeplug ir, Dictionary<string, int> contactIndexByName)
     {
         if (ir.RxGroupLists.Count == 0 && !img.BlockPresent(Layout.GroupListBlock)) return;
+        bool hadBlock = img.BlockPresent(Layout.GroupListBlock);
         var block = img.Block(Layout.GroupListBlock);
+        byte header10 = hadBlock ? block[0x10] : (byte)(ir.RxGroupLists.Count > 0 ? 1 : 0);
         block.Clear();
+        block[0x10] = header10;   // selected-list byte, observed 0x01 [format §7, hw-verified]
         uint bitmap = 0;
         for (int i = 0; i < ir.RxGroupLists.Count; i++)
         {
@@ -342,9 +359,9 @@ public sealed class Dm32uvCodec : IRadioCodec
             SetNameIfChanged(rec[..0x0B], gl.Name);
             for (int n = 0; n < Layout.MaxContactsPerGroupList; n++)
             {
-                uint id = 0;
-                if (n < gl.ContactNames.Count && contactIndexByName.TryGetValue(gl.ContactNames[n], out int ci))
-                    id = ir.Contacts[ci].DmrId;                              // stores DMR IDs [format §7]
+                uint id = n < gl.ContactNames.Count
+                    ? ResolveGroupMemberId(ir, contactIndexByName, gl.ContactNames[n]) ?? 0
+                    : 0;                                                     // stores DMR IDs [format §7]
                 SetU24(rec, 0x0B + n * 3, id);
             }
         }
@@ -365,8 +382,8 @@ public sealed class Dm32uvCodec : IRadioCodec
     {
         if (ir.ScanLists.Count == 0 && !img.BlockPresent(Layout.ScanListBlock)) return;
         var block = img.Block(Layout.ScanListBlock);
-        // entry area rewritten; bank tail (mode/ranges @0xE00) preserved from canvas [format §8, C7]
-        block.Slice(Layout.ScanListsOffset, Layout.MaxScanLists * Layout.ScanListRecordSize).Clear();
+        // Records rewritten in place; bank tail (mode/ranges @0xE00) and slots beyond the
+        // per-list count carry stale CPS bytes — preserved via RawRecord. [format §8, C7/C8]
         block[0x00] = (byte)ir.ScanLists.Count;
         for (int i = 0; i < ir.ScanLists.Count; i++)
         {
@@ -374,36 +391,26 @@ public sealed class Dm32uvCodec : IRadioCodec
             var rec = PrepareSlot(block.Slice(Layout.ScanListsOffset + i * Layout.ScanListRecordSize,
                                               Layout.ScanListRecordSize), sl.RawRecord);
             SetNameIfChanged(rec[..0x0B], sl.Name);
-            var members = sl.ChannelNames.Where(channelIndexByName.ContainsKey)
-                                         .Take(Layout.MaxChannelsPerScanList).ToList();
+            var members = sl.ChannelNames
+                .Where(n => n == CurrentChannelMarker || channelIndexByName.ContainsKey(n))
+                .Take(Layout.MaxChannelsPerScanList).ToList();
             rec[0x0B] = (byte)members.Count;
-            for (int n = 0; n < Layout.MaxChannelsPerScanList; n++)
-                SetU16(rec, 0x18 + n * 2,
-                    (ushort)(n < members.Count ? channelIndexByName[members[n]] + 1 : 0));
+            for (int n = 0; n < members.Count; n++)
+                SetU16(rec, 0x18 + n * 2, (ushort)(members[n] == CurrentChannelMarker
+                    ? 0 : channelIndexByName[members[n]] + 1));
+            if (sl.RawRecord is null)
+                for (int n = members.Count; n < Layout.MaxChannelsPerScanList; n++)
+                    SetU16(rec, 0x18 + n * 2, 0);
         }
+        // Fresh lists beyond any previous content: zero their slots (fresh records handled above);
+        // stale records past the new count keep their bytes — count byte governs. [hw-verified]
     }
 
     private static void EncodeChannels(Dm32Image img, Codeplug ir, Dictionary<string, int> contactIndexByName)
     {
-        int neededChannelBlocks = ir.Channels.Count <= Layout.ChannelsInBank0
-            ? 1
-            : 1 + (ir.Channels.Count - Layout.ChannelsInBank0 + Layout.ChannelsPerBank - 1) / Layout.ChannelsPerBank;
-
-        for (int bi = 0; bi < Layout.ChannelBlockCount; bi++)
-        {
-            int block = Layout.FirstChannelBlock + bi;
-            if (bi >= neededChannelBlocks && !img.BlockPresent(block)) continue;
-            img.Block(block).Clear();
-        }
-        for (int bi = 0; bi < Layout.ExtensionBlockCount; bi++)
-        {
-            int block = Layout.FirstExtensionBlock + bi;
-            bool needed = ir.Channels.Count > bi * Layout.ExtensionsPerBlock;
-            if (!needed && !img.BlockPresent(block)) continue;
-            img.Block(block).Clear();
-        }
-
-        SetU16(img.Block(Layout.FirstChannelBlock), 0x00, (ushort)ir.Channels.Count);   // [format §4]
+        // No wholesale clearing: the count at bank-0 governs; stale records/banks beyond it
+        // keep their bytes (CPS behaviour, hw-verified). [format §4 note]
+        SetU16(img.Block(Layout.FirstChannelBlock), 0x00, (ushort)ir.Channels.Count);
 
         var scanIndexByName = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < ir.ScanLists.Count; i++) scanIndexByName.TryAdd(ir.ScanLists[i].Name, i);
@@ -415,15 +422,17 @@ public sealed class Dm32uvCodec : IRadioCodec
             var rec = PrepareSlot(img.Block(block).Slice(off, Layout.ChannelRecordSize), ch.RawRecord);
             EncodeChannelRecord(rec, ch, scanIndexByName, ir);
 
-            if (ch is DigitalChannel d)
-            {
-                var (eb, eo) = Layout.ExtensionSlot(i);                      // [format §5]
-                var ext = img.Block(eb).Slice(eo, Layout.ExtensionRecordSize);
-                int idx = d.TxContactName is not null && contactIndexByName.TryGetValue(d.TxContactName, out int ci)
-                    ? ci + 1 : 0;
-                SetBits(ext, 0, 0, 4, idx >> 8);
-                ext[1] = (byte)idx;
-            }
+            var (eb, eo) = Layout.ExtensionSlot(i);                          // [format §5, hw-verified]
+            var ext = img.Block(eb).Slice(eo, Layout.ExtensionRecordSize);
+            int idx = ch is DigitalChannel d && d.TxContactName is not null
+                      && contactIndexByName.TryGetValue(d.TxContactName, out int ci)
+                ? ci + 1 : 0;
+            if (idx > 0xFF)
+                throw new Dm32FormatException(
+                    $"Channel '{ch.Name}': TX contact slot {idx} exceeds 255 — extension byte width " +
+                    "unknown beyond that (format doc §5); reorder contacts so TX talkgroups come first.");
+            ext[0] = (byte)(ch is DigitalChannel ? 0x01 : 0x00);             // assigned flag
+            ext[1] = (byte)idx;                                              // 1-based slot; 0 = none
         }
     }
 
@@ -470,19 +479,10 @@ public sealed class Dm32uvCodec : IRadioCodec
 
     private static void EncodeZones(Dm32Image img, Codeplug ir, Dictionary<string, int> channelIndexByName)
     {
-        int neededBanks = ir.Zones.Count == 0 ? 1 : (ir.Zones.Count + Layout.ZonesPerBank - 1) / Layout.ZonesPerBank;
         if (ir.Zones.Count == 0 && !img.BlockPresent(Layout.FirstZoneBlock)) return;
 
-        for (int bi = 0; bi < Layout.ZoneBlockCount; bi++)
-        {
-            int block = Layout.FirstZoneBlock + bi;
-            if (bi >= neededBanks && !img.BlockPresent(block)) continue;
-            var span = img.Block(block);
-            // Bank 0 header carries VFO state at 0x01-0x08 — preserve it, rewrite records area. [format §3]
-            if (bi == 0) span[Layout.ZoneBankHeader..].Clear();
-            else span.Clear();
-        }
-
+        // Count governs; stale zone records beyond it are preserved. Bank-0 header keeps its
+        // VFO state (bytes 0x01-0x08). [format §3, hw-verified]
         var bank0 = img.Block(Layout.FirstZoneBlock);
         bank0[0x00] = (byte)ir.Zones.Count;
 

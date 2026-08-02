@@ -65,7 +65,7 @@ public static class Layout
     public const int ScanListsOffset = 0x01;
     public const int ScanListRecordSize = 0x39;
     public const int MaxScanLists = 31;
-    public const int MaxChannelsPerScanList = 15;
+    public const int MaxChannelsPerScanList = 16;   // entries 0x18-0x37 = 16 x u16 (hw-verified)
     /// <summary>Channel record's scan-list nibble is 4 bits, 1-based: only lists 0-14 are addressable per-channel.</summary>
     public const int MaxChannelReferencableScanList = 14;
 
