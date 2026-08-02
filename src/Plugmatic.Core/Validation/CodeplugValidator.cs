@@ -108,13 +108,16 @@ public static class CodeplugValidator
                 Err($"scan list '{s.Name}': unknown channel '{cn}'");
         }
 
-        // Duplicate channel definitions (same RX + same mode + same name handled above; catch freq dupes)
-        foreach (var dupe in plug.Channels.GroupBy(c => (c.RxFrequency.Hz, c.GetType().Name,
-                     c is DigitalChannel dd ? dd.TxContactName : (c as AnalogChannel)?.RxTone.ToString()))
-                     .Where(g => g.Count() > 1 && g.Key.Hz != 0))
+        // Duplicate channel definitions: same RX+TX+mode+selector is a true duplicate
+        // (simplex vs repeater on a shared output differ by TX frequency).
+        foreach (var dupe in plug.Channels.GroupBy(c => (c.RxFrequency.Hz, c.TxFrequency.Hz, c.GetType().Name,
+                     c is DigitalChannel dd
+                         ? $"{dd.TxContactName}/{dd.TimeSlot}"
+                         : (c as AnalogChannel)?.TxTone.ToString()))
+                     .Where(g => g.Count() > 1 && g.Key.Item1 != 0))
         {
             var names = string.Join("', '", dupe.Select(c => c.Name));
-            Err($"duplicate channels (same RX/mode/selector): '{names}'");
+            Err($"duplicate channels (same RX/TX/mode/selector): '{names}'");
         }
 
         // I4: NOAA frequencies and 467 interstitials must be TxInhibited, regardless of config.

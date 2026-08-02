@@ -1,0 +1,19 @@
+# plugmatic build profile — Colorado defaults [spec §6.3.2]
+name: colorado-default
+radiusMi: 60
+maxChannels: 1000
+zoneStrategy: by-town        # by-town | by-repeater | by-network
+analogHam: true
+digitalHam: true
+gmrs: true                   # RX-only unless `plugmatic config gmrs-tx enable`
+noaa: true                   # NOAA WX zone, always RX-only
+namingTemplate: "{khz} {call}"
+maxTalkgroupsPerRepeater: 8
+talkgroups:
+  - { name: Local 2, id: 2, slot: 2 }
+  - { name: Colorado, id: 3108, slot: 1 }
+  - { name: North Colorado, id: 3171, slot: 1 }
+  - { name: TAC 310, id: 310, slot: 1 }
+  - { name: TAC 311, id: 311, slot: 1 }
+  - { name: TAC 312, id: 312, slot: 1 }
+  - { name: Parrot, id: 9990, private: true, slot: 2 }

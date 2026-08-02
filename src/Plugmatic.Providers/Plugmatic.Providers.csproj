@@ -8,10 +8,12 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Plugmatic.Core\Plugmatic.Core.csproj" />
+    <ProjectReference Include="..\Plugmatic.Location\Plugmatic.Location.csproj" />
   </ItemGroup>
 
 </Project>

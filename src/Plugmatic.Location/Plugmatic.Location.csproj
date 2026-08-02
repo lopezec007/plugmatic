@@ -14,4 +14,8 @@
     <ProjectReference Include="..\Plugmatic.Core\Plugmatic.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Resources/us-zips.tsv.gz" />
+  </ItemGroup>
+
 </Project>
