@@ -239,8 +239,15 @@ the current-channel marker; slots **beyond the count contain stale bytes** the C
 never cleared — byte-faithful re-encode must preserve them and let the count govern.
 Example from our radio: count 12 = marker + channels 17–27, slots 12–14 stale.
 
-v1 builder only writes: name, count, channel list, mode bytes zeroed-to-defaults.
-(source: qdmr-observed + dm32-spec + hw; verified: hw for name/count/list/marker, C8 else)
+**Fresh-record defaults (hw-observed):** every CPS-written analog list carries
+settings bytes `+0x0C..+0x17` = `00 06 00 01 00 00 00 00 00 14 00 00` (i.e. +0x0D=0x06,
+revert u16 +0x0F=0x0001, +0x15=0x14; DMR lists may differ at +0x0F/+0x15). An
+**all-zero settings area makes the radio treat the list as invalid** — channel
+scan-list assignments display as none — so new records must start from these defaults
+(meanings per C7/C8 still opaque; values copied verbatim from factory-golden).
+
+v1 builder writes: name, count, channel list, and the default settings bytes above.
+(source: qdmr-observed + dm32-spec + hw; verified: hw for name/count/list/marker/defaults, C8 else)
 
 ## 9. General settings (block 0x04, +0x000, 256 B) — decoded subset
 

@@ -93,6 +93,9 @@ public sealed class Zone
 
 public sealed class ScanList
 {
+    /// <summary>Member marker for the radio's "current channel" slot.</summary>
+    public const string CurrentChannelMarker = "@current";
+
     public string Name { get; set; } = "";
     public List<string> ChannelNames { get; set; } = [];
     /// <summary>See Channel.RawRecord.</summary>

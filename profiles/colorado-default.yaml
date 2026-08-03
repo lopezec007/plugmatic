@@ -3,6 +3,7 @@ name: colorado-default
 radiusMi: 60
 maxChannels: 1000
 zoneStrategy: by-town        # by-town | by-repeater | by-network
+nameStyle: callsign          # callsign ("W0ABC Colorado") | frequency ("775 Colorado")
 analogHam: true
 digitalHam: true
 gmrs: true                   # RX-only unless `plugmatic config gmrs-tx enable`

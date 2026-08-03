@@ -33,10 +33,13 @@ public class BuilderTests
         },
     ];
 
-    private static BuildResult BuildWith(bool gmrsTx, uint dmrId = 3217632)
+    private static BuildResult BuildWith(bool gmrsTx, uint dmrId = 3217632,
+        ChannelNameStyle style = ChannelNameStyle.Callsign)
     {
         var builder = new CodeplugBuilder(Caps, new GeneralSettings { RadioId = dmrId, Callsign = "TEST" });
-        return builder.Build(SampleRepeaters(), BuildProfile.ColoradoDefault(),
+        var profile = BuildProfile.ColoradoDefault();
+        profile.NameStyle = style;
+        return builder.Build(SampleRepeaters(), profile,
             new GmrsPolicy(gmrsTx, gmrsTx ? "2026-08-01T00:00:00Z" : null));
     }
 
@@ -141,10 +144,57 @@ public class BuilderTests
     }
 
     [Fact]
-    public void Analog_names_use_khz_call_template()
+    public void Frequency_style_uses_khz_call_template()
+    {
+        var plug = BuildWith(gmrsTx: false, style: ChannelNameStyle.Frequency).Codeplug;
+        Assert.NotNull(plug.FindChannel("145115 W0UPS"));
+        Assert.NotNull(plug.FindChannel("775 Colorado"));
+    }
+
+    [Fact]
+    public void Callsign_style_is_default_drops_khz_and_tg()
     {
         var plug = BuildWith(gmrsTx: false).Codeplug;
-        Assert.NotNull(plug.FindChannel("145115 W0UPS"));
+        Assert.NotNull(plug.FindChannel("W0UPS"));                 // analog: bare callsign
+        Assert.NotNull(plug.FindChannel("N0DMR Colorado"));        // digital: call + talkgroup
+        Assert.NotNull(plug.FindChannel("N0DMR 310815"));          // pseudo-TG: "TG" stripped
+        Assert.Null(plug.FindChannel("N0DMR TG310815"));
+        Assert.Equal(ChannelNameStyle.Callsign, new BuildProfile().NameStyle);
+    }
+
+    [Fact]
+    public void Callsign_style_collisions_disambiguate_with_khz()
+    {
+        var repeaters = SampleRepeaters();
+        repeaters.Add(new Repeater
+        {
+            Callsign = "W0UPS", Output = Frequency.FromMHz(447.700m), Input = Frequency.FromMHz(442.700m),
+            Mode = RepeaterMode.Fm, City = "Fort Collins", Lat = 40.57, Lon = -105.09, DistanceKm = 6,
+        });
+        var builder = new CodeplugBuilder(Caps, new GeneralSettings { RadioId = 1, Callsign = "T" });
+        var plug = builder.Build(repeaters, BuildProfile.ColoradoDefault(), new GmrsPolicy(false, null)).Codeplug;
+        Assert.NotNull(plug.FindChannel("W0UPS"));
+        Assert.NotNull(plug.FindChannel("W0UPS 700"));
+        Assert.Empty(CodeplugValidator.Validate(plug, Caps));
+    }
+
+    [Fact]
+    public void Scan_lists_generated_per_zone_and_referenced()
+    {
+        var plug = BuildWith(gmrsTx: false).Codeplug;
+        Assert.Equal(plug.Zones.Count, plug.ScanLists.Count);
+        foreach (var sl in plug.ScanLists)
+        {
+            Assert.True(sl.Name.Length <= 11, sl.Name);
+            Assert.Equal(ScanList.CurrentChannelMarker, sl.ChannelNames[0]);
+            Assert.True(sl.ChannelNames.Count <= Caps.MaxChannelsPerScanList);
+        }
+        // Every channel that lives in a zone points at that zone's scan list.
+        var zone = plug.Zones.First(z => z.Name == "NOAA WX");
+        var list = plug.ScanLists.Single(s => s.Name == "NOAA WX");
+        foreach (var chName in zone.ChannelNames)
+            Assert.Equal(list.Name, plug.FindChannel(chName)!.ScanListName);
+        Assert.Empty(CodeplugValidator.Validate(plug, Caps));
     }
 
     [Fact]

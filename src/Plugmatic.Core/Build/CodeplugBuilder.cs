@@ -82,7 +82,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
             {
                 var ch = new AnalogChannel
                 {
-                    Name = ChannelName(profile.NamingTemplate, r, names),
+                    Name = AnalogName(profile, r, names),
                     RxFrequency = r.Output,
                     TxFrequency = r.Input,
                     Power = PowerLevel.High,
@@ -106,7 +106,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                     if (contactName is null) continue;
                     var ch = new DigitalChannel
                     {
-                        Name = DigitalName(r, contactName, names),
+                        Name = DigitalName(profile, r, contactName, names),
                         RxFrequency = r.Output,
                         TxFrequency = r.Input,
                         TxPermit = dmrTxAllowed ? TxPermit.Allowed : TxPermit.Inhibited,
@@ -149,7 +149,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                 }
                 var ch = new AnalogChannel
                 {
-                    Name = ChannelName("GMRS R{num} {call}".Replace("{num}", main.Num.ToString()), r, names),
+                    Name = Unique($"GMRS R{main.Num} {r.Callsign}", names, r),
                     RxFrequency = r.Output,
                     TxFrequency = r.Output + 5_000_000,        // +5.000 MHz repeater input [spec §6.3.3]
                     TxPermit = gmrs.TxEnabled ? TxPermit.Allowed : TxPermit.Inhibited,
@@ -199,11 +199,60 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                 plug.Zones.Add(new Zone { Name = Fit($"{zone.Name} {part++}", 16), ChannelNames = [.. chunk] });
         }
 
+        BuildScanLists(plug, notes);
+
         if (plug.Channels.Count > profile.MaxChannels)
             notes.Add($"NOTE: {plug.Channels.Count} channels exceed profile maxChannels {profile.MaxChannels}; " +
                       "reduce radius or talkgroup fan-out (channels are distance-sorted, nothing was cut silently).");
 
         return new BuildResult(plug, notes);
+    }
+
+    /// <summary>
+    /// One scan list per zone, mirroring the factory CPS convention: the current-channel
+    /// marker first, then the zone's channels. The channel record's scan-list field is a
+    /// 4-bit 1-based index, so only the first 15 lists are referencable — zones beyond
+    /// that get no list (noted, not silent).
+    /// </summary>
+    private void BuildScanLists(Codeplug plug, List<string> notes)
+    {
+        const int maxReferencable = 15;
+        var listNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var zone in plug.Zones)
+        {
+            if (plug.ScanLists.Count >= maxReferencable)
+            {
+                notes.Add($"Zone '{zone.Name}' has no scan list (channel records can only reference {maxReferencable}).");
+                continue;
+            }
+            var name = UniqueListName(zone.Name, listNames);
+            var sl = new ScanList { Name = name };
+            sl.ChannelNames.Add(ScanList.CurrentChannelMarker);
+            foreach (var ch in zone.ChannelNames.Take(caps.MaxChannelsPerScanList - 1))
+                sl.ChannelNames.Add(ch);
+            if (zone.ChannelNames.Count > caps.MaxChannelsPerScanList - 1)
+                notes.Add($"Scan list '{name}' covers the first {caps.MaxChannelsPerScanList - 1} of " +
+                          $"{zone.ChannelNames.Count} channels in zone '{zone.Name}'.");
+            plug.ScanLists.Add(sl);
+            foreach (var chName in zone.ChannelNames)
+                if (plug.FindChannel(chName) is { ScanListName: null } ch)
+                    ch.ScanListName = name;
+        }
+    }
+
+    private static string UniqueListName(string zoneName, HashSet<string> taken)
+    {
+        // Keep a " DMR" suffix visible when the 11-char budget would truncate it away
+        // (zones "Fort Collins" / "Fort Collins DMR" must not collapse to the same list name).
+        var name = zoneName.Length > 11 && zoneName.EndsWith(" DMR", StringComparison.Ordinal)
+            ? Fit(zoneName[..^4], 7) + " DMR"
+            : Fit(zoneName, 11);
+        if (taken.Add(name)) return name;
+        for (int i = 2; ; i++)
+        {
+            var candidate = Fit(zoneName, 11 - (i.ToString().Length + 1)) + "~" + i;
+            if (taken.Add(candidate)) return candidate;
+        }
     }
 
     // ---------------------------------------------------------------- helpers
@@ -284,28 +333,51 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
         zone.ChannelNames.Add(ch.Name);
     }
 
-    private static string ChannelName(string template, Repeater r, HashSet<string> taken)
+    /// <summary>kHz fragment of the output frequency, e.g. 448.775 MHz -> "775".</summary>
+    private static string KhzFrag(Repeater r) => (r.Output.Hz % 1_000_000 / 1000).ToString("D3");
+
+    private static string AnalogName(BuildProfile profile, Repeater r, HashSet<string> taken)
     {
-        var khz = (r.Output.Hz / 1000 % 1000000).ToString("D6").TrimStart('0');
-        var name = template
-            .Replace("{call}", r.Callsign)
-            .Replace("{city}", TitleCase(r.City ?? ""))
-            .Replace("{mhz}", r.Output.MHz.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture))
-            .Replace("{khz}", khz)
-            .Trim();
-        return Unique(Fit(name, 16), taken);
+        switch (profile.NameStyle)
+        {
+            case ChannelNameStyle.Frequency:
+                var khz = (r.Output.Hz / 1000 % 1000000).ToString("D6").TrimStart('0');
+                var name = profile.NamingTemplate
+                    .Replace("{call}", r.Callsign)
+                    .Replace("{city}", TitleCase(r.City ?? ""))
+                    .Replace("{mhz}", r.Output.MHz.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture))
+                    .Replace("{khz}", khz)
+                    .Trim();
+                return Unique(name, taken, r);
+            default:   // Callsign: bare callsign; collisions disambiguated by kHz fragment
+                return Unique(r.Callsign, taken, r);
+        }
     }
 
-    private static string DigitalName(Repeater r, string contactName, HashSet<string> taken)
+    private static string DigitalName(BuildProfile profile, Repeater r, string contactName, HashSet<string> taken)
     {
-        // "775 Colorado" style: kHz-within-MHz fragment + talkgroup name (e.g. 448.775 -> 775).
-        var frag = (r.Output.Hz % 1_000_000 / 1000).ToString("D3");
-        return Unique(Fit($"{frag} {contactName}", 16), taken);
+        // "TG" is dropped from raw-talkgroup pseudo-names to save screen space.
+        var tg = contactName.StartsWith("TG", StringComparison.Ordinal)
+                 && contactName.Length > 2 && char.IsDigit(contactName[2])
+            ? contactName[2..] : contactName;
+        return profile.NameStyle switch
+        {
+            ChannelNameStyle.Frequency => Unique($"{KhzFrag(r)} {contactName}", taken, r),
+            _ => Unique($"{r.Callsign} {tg}", taken, r),   // Callsign (default)
+        };
     }
 
-    private static string Unique(string name, HashSet<string> taken)
+    /// <summary>Reserve a unique 16-char name: as-is, then with the kHz fragment, then ~n.</summary>
+    private static string Unique(string name, HashSet<string> taken, Repeater? r = null)
     {
+        name = Fit(name, 16);
         if (taken.Add(name)) return name;
+        if (r is not null)
+        {
+            var frag = KhzFrag(r);
+            var withFrag = Fit(name, 16 - frag.Length - 1) + " " + frag;
+            if (taken.Add(withFrag)) return withFrag;
+        }
         for (int i = 2; ; i++)
         {
             var candidate = Fit(name, 16 - (i.ToString().Length + 1)) + "~" + i;

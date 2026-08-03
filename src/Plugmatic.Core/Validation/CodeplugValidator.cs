@@ -103,8 +103,9 @@ public static class CodeplugValidator
         {
             if (s.ChannelNames.Count > caps.MaxChannelsPerScanList)
                 Err($"scan list '{s.Name}': {s.ChannelNames.Count} channels exceed {caps.MaxChannelsPerScanList}");
-            // "@current" is the radio's current-channel member marker, not a channel reference.
-            foreach (var cn in s.ChannelNames.Where(cn => cn != "@current" && !channelNames.Contains(cn)))
+            // The current-channel member marker is not a channel reference.
+            foreach (var cn in s.ChannelNames.Where(cn =>
+                         cn != ScanList.CurrentChannelMarker && !channelNames.Contains(cn)))
                 Err($"scan list '{s.Name}': unknown channel '{cn}'");
         }
 

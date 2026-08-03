@@ -136,7 +136,7 @@ public sealed class Dm32uvCodec : IRadioCodec
     }
 
     /// <summary>Scan-list member marker for the radio's "current channel" slot (wire value 0).</summary>
-    public const string CurrentChannelMarker = "@current";
+    public const string CurrentChannelMarker = ScanList.CurrentChannelMarker;
 
     private static void DecodeScanLists(Dm32Image img, Codeplug ir, out List<List<int>> channelNumbers)
     {
@@ -393,6 +393,15 @@ public sealed class Dm32uvCodec : IRadioCodec
             var sl = ir.ScanLists[i];
             var rec = PrepareSlot(block.Slice(Layout.ScanListsOffset + i * Layout.ScanListRecordSize,
                                               Layout.ScanListRecordSize), sl.RawRecord);
+            if (sl.RawRecord is null)
+            {
+                // Fresh record: settings bytes exactly as the factory CPS writes them —
+                // an all-zero settings area makes the radio treat the list as invalid and
+                // drop channel assignments. [format §8, hw-verified]
+                rec[0x0D] = 0x06;
+                rec[0x0F] = 0x01;   // revert word 0x0001
+                rec[0x15] = 0x14;
+            }
             SetNameIfChanged(rec[..0x0B], sl.Name);
             var members = sl.ChannelNames
                 .Where(n => n == CurrentChannelMarker || channelIndexByName.ContainsKey(n))

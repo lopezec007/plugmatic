@@ -13,10 +13,21 @@ public sealed class ProfileTalkgroup
     public int Slot { get; set; } = 1;
 }
 
+/// <summary>How generated channels are named. Extensible — add a member + a case in the builder.</summary>
+public enum ChannelNameStyle
+{
+    /// <summary>"WA0ABC Colorado" / "WA0ABC 310815": repeater callsign + talkgroup (no kHz, no "TG"). Default.</summary>
+    Callsign,
+    /// <summary>"145115 WA0ABC" / "775 Colorado": kHz fragment first (the original style).</summary>
+    Frequency,
+}
+
 /// <summary>Build profile (profiles/*.yaml). [spec §6.3.2]</summary>
 public sealed class BuildProfile
 {
     public string Name { get; set; } = "default";
+    /// <summary>Channel naming style: callsign (default) | frequency.</summary>
+    public ChannelNameStyle NameStyle { get; set; } = ChannelNameStyle.Callsign;
     public double RadiusMi { get; set; } = 60;
     public int MaxChannels { get; set; } = 1000;
     /// <summary>by-town | by-repeater | by-network</summary>
