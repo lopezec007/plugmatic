@@ -32,6 +32,11 @@ public sealed class GeneralSettings
     public uint RadioId { get; set; }
     /// <summary>Operator callsign; used as the radio-ID entry name (12 chars max).</summary>
     public string Callsign { get; set; } = "";
+
+    /// <summary>Radio-wide group-call match. Default off — the DM-32UV ships this way.</summary>
+    public bool GroupCallMatch { get; set; }
+    /// <summary>Radio-wide private-call match. Default off.</summary>
+    public bool PrivateCallMatch { get; set; }
 }
 
 public sealed class Contact

@@ -45,6 +45,7 @@ public sealed class Dm32uvCodec : IRadioCodec
                 ir.RawBlocks[(uint)(b * Dm32Image.BlockSize)] =
                     img.Bytes.AsSpan(b * Dm32Image.BlockSize, Dm32Image.BlockSize).ToArray();
 
+        DecodeGeneralSettings(img, ir);
         DecodeContacts(img, ir);
         DecodeGroupLists(img, ir);
         DecodeRadioIds(img, ir);
@@ -62,6 +63,24 @@ public sealed class Dm32uvCodec : IRadioCodec
             }
 
         return ir;
+    }
+
+    private static void DecodeGeneralSettings(Dm32Image img, Codeplug ir)
+    {
+        if (!img.BlockPresent(Layout.SettingsBlock)) return;
+        var rec = img.ReadBlock(Layout.SettingsBlock);                       // [format §9]
+        ir.Settings.GroupCallMatch = GetBit(rec, Layout.SettingsCallMatchOffset, 0);
+        ir.Settings.PrivateCallMatch = GetBit(rec, Layout.SettingsCallMatchOffset, 1);
+    }
+
+    private static void EncodeGeneralSettings(Dm32Image img, Codeplug ir)
+    {
+        // Only ever a read-modify-write of the two known bits: the rest of the settings
+        // block is undecoded and must survive verbatim. Never fabricate the block.
+        if (!img.BlockPresent(Layout.SettingsBlock)) return;
+        var rec = img.Block(Layout.SettingsBlock);
+        SetBit(rec, Layout.SettingsCallMatchOffset, 0, ir.Settings.GroupCallMatch);
+        SetBit(rec, Layout.SettingsCallMatchOffset, 1, ir.Settings.PrivateCallMatch);
     }
 
     private static void DecodeContacts(Dm32Image img, Codeplug ir)
@@ -275,6 +294,7 @@ public sealed class Dm32uvCodec : IRadioCodec
         var contactIndexByName = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < ir.Contacts.Count; i++) contactIndexByName.TryAdd(ir.Contacts[i].Name, i);
 
+        EncodeGeneralSettings(img, ir);
         EncodeContacts(img, ir);
         EncodeContactIndex(img, ir);
         EncodeGroupLists(img, ir, contactIndexByName);

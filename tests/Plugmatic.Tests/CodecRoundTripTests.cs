@@ -164,6 +164,28 @@ public class CodecRoundTripTests
     }
 
     [Fact]
+    public void Call_match_flags_are_written_off_and_leave_the_rest_of_settings_alone()
+    {
+        // hw-verified: settings block 0x04, offset 0x060, bits 0+1 = the call-match pair.
+        var codec = Dm32uvCodec.Instance;
+        var canvas = new Dm32Image(codec.Encode(SampleIr()));
+        var settings = canvas.AllocateBlock(Layout.SettingsBlock);
+        settings.Fill(0x77);          // stand-in for undecoded settings; bits 0+1 set = both matches on
+
+        var ir = codec.Decode(canvas.Bytes);
+        Assert.True(ir.Settings.GroupCallMatch);
+        Assert.True(ir.Settings.PrivateCallMatch);
+
+        ir.Settings.GroupCallMatch = false;                     // what the builder generates
+        ir.Settings.PrivateCallMatch = false;
+        var written = new Dm32Image(codec.Encode(ir, canvas.Bytes));
+        var after = written.ReadBlock(Layout.SettingsBlock);
+        Assert.Equal(0x74, after[Layout.SettingsCallMatchOffset]);   // bits 0-1 cleared, 0x74 kept
+        Assert.Equal(0x77, after[Layout.SettingsCallMatchOffset + 1]);
+        Assert.Equal(0x77, after[Layout.SettingsCallMatchOffset - 1]);
+    }
+
+    [Fact]
     public void Channel_scan_list_index_is_a_literal_not_a_shifted_nibble()
     {
         // Hardware evidence: the radio itself wrote 0x01 for list 1 (DMR) and 0x89 for

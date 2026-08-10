@@ -265,6 +265,15 @@ the current-channel marker; slots **beyond the count contain stale bytes** the C
 never cleared — byte-faithful re-encode must preserve them and let the count govern.
 Example from our radio: count 12 = marker + channels 17–27, slots 12–14 stale.
 
+The current-channel member (wire value 0) is confirmed by the radio's own UI: it lists
+a **"Cur Chan"** entry alongside the real members of a plugmatic-written list
+(hw-verified 2026-08-10).
+
+**Note on scanning behaviour:** while scanning, this radio does **not** display the
+channel it is currently sweeping — the screen keeps showing the channel you started
+from, which looks exactly like a scan that refuses to advance. Confirm scanning by
+whether it stops on activity, not by the display.
+
 **+0x16 u16 LE — per-member "member is a digital channel" bitmask** (bit *i* set when
 member slot *i* holds a DMR channel; bit 0 is the current-channel marker and is always
 clear). Hardware-verified against all 10 factory lists, including mixed lists
@@ -296,10 +305,19 @@ Fields plugmatic reads (and rewrites verbatim unless stated):
 | 0xA0 | TX timeout |
 | 0xA2/0xA3 | VOX level / delay |
 | 0xA6/0xA7 | FM / DMR mic level |
+| **0x60** | **Call-match flags — bit 0 and bit 1 are the group-call / private-call match pair (hw-verified)** |
 
-Full bit map exists (source: qdmr-observed) but v1 does not edit this block — it is
-carried as passthrough; only decoded for `read.yaml` display. The radio's own DMR ID +
-callsign live in §10, not here.
+**0x60 call match (hw-verified 2026-08-10).** Toggling both call-match settings in the
+radio's menu changed exactly this byte, 0x00 → 0x03. They are **radio-wide**, not
+per-channel, despite qdmr modelling call behaviour per channel. Which bit is group vs
+private was not isolated (both were toggled together) — **VERIFY** if it ever matters.
+This radio read 0x00 in its factory-golden dump and in every image since, so **off is
+the shipped default**; plugmatic writes both bits off and leaves the rest of the block
+byte-for-byte untouched (read-modify-write of two bits only; the block is never
+fabricated when absent).
+
+The rest of the block is passthrough: a fuller bit map exists (source: qdmr-observed)
+but v1 edits nothing else here. The radio's own DMR ID + callsign live in §10, not here.
 
 ## 10. Radio ID list (block 0x67)
 

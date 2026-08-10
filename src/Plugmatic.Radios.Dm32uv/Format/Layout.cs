@@ -5,6 +5,8 @@ public static class Layout
 {
     // [format §2] virtual block numbers
     public const int SettingsBlock = 0x04;
+    /// <summary>Radio-wide call-match flags: bit 0 group call, bit 1 private call. [format §9]</summary>
+    public const int SettingsCallMatchOffset = 0x060;
     public const int ContactIndexBlock = 0x0B;
     public const int GroupListBlock = 0x0F;
     public const int ScanListBlock = 0x11;
