@@ -9,6 +9,25 @@ public sealed record SerialSettings(string PortName, int BaudRate = 115200)
     public bool RtsEnable { get; init; } = false;
 }
 
+/// <summary>
+/// Everything the CLI needs to drive one radio model. Adding a radio means adding a
+/// definition here and registering it — no command should ever name a model directly.
+/// </summary>
+public interface IRadioDefinition
+{
+    /// <summary>CLI name, lower-case (the `--radio` value and the run-directory name).</summary>
+    string Model { get; }
+    string DisplayName { get; }
+    IRadioCodec Codec { get; }
+    IRadioProtocol CreateProtocol();
+    /// <summary>Model strings this radio may report at identify; I2 preflight matches these.</summary>
+    IReadOnlyList<string> IdentifiesAs { get; }
+    /// <summary>USB VID:PID values of the programming interface, lower-case "vvvv:pppp".</summary>
+    IReadOnlyList<string> KnownUsbIds { get; }
+    /// <summary>False while the radio's codec cannot yet produce a writable image.</summary>
+    bool SupportsWrite { get; }
+}
+
 /// <summary>Abstract serial link — the only seam between protocol code and real hardware.</summary>
 public interface ISerialLink : IAsyncDisposable
 {

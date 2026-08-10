@@ -2,6 +2,7 @@ using System.CommandLine;
 using Plugmatic.Cli.Services;
 using Plugmatic.Core.Model;
 using Plugmatic.Core.Runs;
+using Plugmatic.Radios;
 
 namespace Plugmatic.Cli.Commands;
 
@@ -10,7 +11,7 @@ public static class WriteCommand
 {
     public static Command Build()
     {
-        var radio = new Option<string>("--radio") { Description = "Radio model", DefaultValueFactory = _ => "dm32uv" };
+        var radio = Common.RadioOption();
         var port = new Option<string?>("--port") { Description = "Serial port" };
         var plug = new Option<string?>("--plug") { Description = "generated.yaml (or a run dir containing one)" };
         var image = new Option<string?>("--image") { Description = "Raw image (.bin) to restore" };
@@ -20,14 +21,16 @@ public static class WriteCommand
         foreach (var o in new Option[] { radio, port, plug, image, yes }) cmd.Options.Add(o);
         cmd.SetAction(async (pr, ct) =>
         {
-            Common.RequireDm32uv(pr.GetValue(radio));
-            var source = LoadSource(pr.GetValue(plug), pr.GetValue(image));
-            return await WriteFlow.RunAsync(new RunManager(), pr.GetValue(port), source, pr.GetValue(yes), ct);
+            var def = Common.Resolve(pr.GetValue(radio));
+            if (!def.SupportsWrite)
+                throw new CliError($"{def.DisplayName} support is read-only in this build; writing is not implemented yet.", 1);
+            var source = LoadSource(def, pr.GetValue(plug), pr.GetValue(image));
+            return await WriteFlow.RunAsync(def, new RunManager(), pr.GetValue(port), source, pr.GetValue(yes), ct);
         });
         return cmd;
     }
 
-    public static WriteFlow.Source LoadSource(string? plug, string? image)
+    public static WriteFlow.Source LoadSource(IRadioDefinition def, string? plug, string? image)
     {
         if ((plug is null) == (image is null))
             throw new CliError("Exactly one of --plug or --image is required.", 1);
@@ -46,7 +49,7 @@ public static class WriteCommand
             Codeplug ir;
             try { ir = IrYaml.Deserialize(File.ReadAllText(path)); }
             catch (Exception e) { throw new CliError($"Cannot parse {path}: {e.Message}", 1); }
-            var validation = Plugmatic.Core.Validation.CodeplugValidator.Validate(ir, Plugmatic.Radios.Dm32uv.Format.Dm32uvCodec.Instance.Capabilities);
+            var validation = Plugmatic.Core.Validation.CodeplugValidator.Validate(ir, def.Codec.Capabilities);
             if (validation.Count > 0)
                 throw new CliError("Codeplug validation failed:\n  " + string.Join("\n  ", validation), 1);
             return new WriteFlow.Source(ir, null, Path.GetFileName(path));

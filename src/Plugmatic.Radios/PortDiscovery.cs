@@ -25,6 +25,12 @@ public static class PortDiscovery
                 (vidpid, desc) = LinuxUsbInfo(name);
             bool known = vidpid is not null && KnownCables.ContainsKey(vidpid);
             if (known) desc = KnownCables[vidpid!];
+            // A radio whose own USB stack provides the port is just as "known" as a cable.
+            if (RadioRegistry.ByUsbId(vidpid) is { } radio)
+            {
+                known = true;
+                desc = $"{radio.DisplayName} (--radio {radio.Model})";
+            }
             result.Add(new PortCandidate(name, vidpid, desc, known));
         }
         return result;
@@ -35,23 +41,29 @@ public static class PortDiscovery
         try
         {
             var dev = Path.GetFileName(portName);
-            // /sys/class/tty/ttyUSB0/device -> .../3-5/3-5:1.0/ttyUSB0 ; the USB device dir
-            // (which holds idVendor/idProduct) is two levels above the resolved target.
-            // .NET normalizes ".." lexically before the kernel sees the symlink, so a
-            // component-wise realpath is required.
+            // The depth from the tty to the USB device node differs per driver:
+            //   ttyUSB0 (usb-serial): device -> .../3-5/3-5:1.0/ttyUSB0   (2 levels up)
+            //   ttyACM0 (CDC-ACM):    device -> .../3-6/3-6:1.0          (1 level up)
+            // So walk upward to the first directory carrying idVendor+idProduct instead of
+            // assuming a depth. .NET normalizes ".." lexically before the kernel sees the
+            // symlink, hence the component-wise realpath first.
             var deviceLink = $"/sys/class/tty/{dev}/device";
             if (!Directory.Exists(deviceLink)) return (null, null);
-            var resolved = RealPath(deviceLink);
-            var usbDir = Path.GetDirectoryName(Path.GetDirectoryName(resolved));
-            if (usbDir is null) return (null, null);
-            string? Read(string f)
+            var dir = RealPath(deviceLink);
+            for (int up = 0; up < 6 && dir is not null && dir != "/"; up++)
             {
-                var p = Path.Combine(usbDir, f);
-                return File.Exists(p) ? File.ReadAllText(p).Trim() : null;
+                string? Read(string f)
+                {
+                    var p = Path.Combine(dir!, f);
+                    return File.Exists(p) ? File.ReadAllText(p).Trim() : null;
+                }
+                var vid = Read("idVendor");
+                var pid = Read("idProduct");
+                if (vid is not null && pid is not null)
+                    return ($"{vid}:{pid}", Read("product") ?? Read("manufacturer"));
+                dir = Path.GetDirectoryName(dir);
             }
-            var vid = Read("idVendor"); var pid = Read("idProduct");
-            var product = Read("product") ?? Read("manufacturer");
-            return (vid is null || pid is null ? null : $"{vid}:{pid}", product);
+            return (null, null);
         }
         catch
         {

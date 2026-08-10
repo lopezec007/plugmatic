@@ -1,6 +1,11 @@
 using System.CommandLine;
 using Plugmatic.Cli.Commands;
 using Plugmatic.Cli.Services;
+using Plugmatic.Radios;
+
+// Radio support is registry-driven: adding a radio means registering it here.
+RadioRegistry.Register(Plugmatic.Radios.Dm32uv.Dm32uvRadio.Instance);
+RadioRegistry.Register(Plugmatic.Radios.D878uv.D878uvRadio.Instance);
 
 var root = new RootCommand("plugmatic — DMR radio auto-programmer (Baofeng DM-32UV)");
 

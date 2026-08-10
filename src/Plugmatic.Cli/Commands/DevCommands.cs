@@ -2,6 +2,7 @@ using System.CommandLine;
 using Plugmatic.Cli.Services;
 using Plugmatic.Core.Model;
 using Plugmatic.Core.Runs;
+using Plugmatic.Radios;
 using Plugmatic.Radios.Dm32uv.Format;
 
 namespace Plugmatic.Cli.Commands;
@@ -14,6 +15,7 @@ public static class DevCommands
         var dev = new Command("dev", "Protocol bring-up and reverse-engineering commands");
         dev.Subcommands.Add(BuildIdentify());
         dev.Subcommands.Add(BuildDump());
+        dev.Subcommands.Add(BuildPeek());
         dev.Subcommands.Add(BuildDecode());
         dev.Subcommands.Add(BuildDiffBin());
         dev.Subcommands.Add(BuildReplay());
@@ -28,16 +30,18 @@ public static class DevCommands
     private static Command BuildIdentify()
     {
         var port = PortOption();
+        var radioOpt = Common.RadioOption();
         var cmd = new Command("identify", "Handshake + identify; print and archive the raw response");
-        cmd.Options.Add(port);
+        cmd.Options.Add(port); cmd.Options.Add(radioOpt);
         cmd.SetAction(async (pr, ct) =>
         {
+            var radio = Common.Resolve(pr.GetValue(radioOpt));
             var runs = new RunManager();
-            var run = runs.CreateRun("dm32uv", "dev");
+            var run = runs.CreateRun(radio.Model, "dev");
             var outcome = RunOutcome.Failed;
             try
             {
-                await using var session = await RadioSession.OpenAsync(pr.GetValue(port), run, ct);
+                await using var session = await RadioSession.OpenAsync(radio, pr.GetValue(port), run, ct);
                 var id = await session.IdentifyAsync(ct);
                 var text =
                     $"model: {id.Model}\nfirmware: {id.FirmwareVersion}\nbuildDate: {id.BuildDate}\n" +
@@ -46,7 +50,7 @@ public static class DevCommands
                 Console.Write(text);
                 run.WriteArtifact("identify.txt", text);
                 run.Extra["radio"] = new System.Text.Json.Nodes.JsonObject
-                { ["model"] = "dm32uv", ["reportedId"] = id.Model, ["firmware"] = id.FirmwareVersion };
+                { ["model"] = radio.Model, ["reportedId"] = id.Model, ["firmware"] = id.FirmwareVersion };
                 outcome = RunOutcome.Success;
                 return 0;
             }
@@ -64,28 +68,28 @@ public static class DevCommands
         var port = PortOption();
         var outOpt = new Option<string?>("--out") { Description = "Also copy dump.bin to this path" };
         var tagOpt = new Option<string?>("--tag") { Description = "Tag for the run manifest (e.g. factory-golden)" };
+        var radioOpt = Common.RadioOption();
         var cmd = new Command("dump", "Full codeplug image read via the native protocol (ladder step 2)");
-        cmd.Options.Add(port); cmd.Options.Add(outOpt); cmd.Options.Add(tagOpt);
+        cmd.Options.Add(port); cmd.Options.Add(outOpt); cmd.Options.Add(tagOpt); cmd.Options.Add(radioOpt);
         cmd.SetAction(async (pr, ct) =>
         {
+            var radio = Common.Resolve(pr.GetValue(radioOpt));
             var runs = new RunManager();
-            var run = runs.CreateRun("dm32uv", "dev");
+            var run = runs.CreateRun(radio.Model, "dev");
             if (pr.GetValue(tagOpt) is { } tag) run.Tags.Add(tag);
             Console.WriteLine($"Run: {run.Directory}");
             var outcome = RunOutcome.Failed;
             try
             {
-                await using var session = await RadioSession.OpenAsync(pr.GetValue(port), run, ct);
+                await using var session = await RadioSession.OpenAsync(radio, pr.GetValue(port), run, ct);
                 var id = await session.IdentifyAsync(ct);
                 run.Extra["radio"] = new System.Text.Json.Nodes.JsonObject
-                { ["model"] = "dm32uv", ["reportedId"] = id.Model, ["firmware"] = id.FirmwareVersion };
+                { ["model"] = radio.Model, ["reportedId"] = id.Model, ["firmware"] = id.FirmwareVersion };
                 Console.WriteLine($"Radio: {id.Model} fw {id.FirmwareVersion}; codeplug 0x{id.CodeplugMemoryStart:X6}-0x{id.CodeplugMemoryEnd:X6}");
                 var image = await session.Protocol.ReadImageAsync(session.Link, WriteFlow.ConsoleProgress(), ct);
                 var path = run.WriteArtifact("dump.bin", image);
                 if (pr.GetValue(outOpt) is { } outPath) File.Copy(path, outPath, overwrite: true);
-                int present = Enumerable.Range(0, Dm32Image.BlockCount)
-                    .Count(b => new Dm32Image(image).BlockPresent(b));
-                Console.WriteLine($"Dumped {present} present blocks -> {path}");
+                Console.WriteLine($"Dumped 0x{image.Length:X} bytes -> {path}");
                 outcome = RunOutcome.Success;
                 return 0;
             }
@@ -96,23 +100,69 @@ public static class DevCommands
         return cmd;
     }
 
+    // ---------------------------------------------------------------- peek
+
+    /// <summary>Read-class probe of an arbitrary address range (spec §3.3 allows this freely).</summary>
+    private static Command BuildPeek()
+    {
+        var addrArg = new Argument<string>("address") { Description = "Radio address, e.g. 0x024C1500" };
+        var lenOpt = new Option<int>("--length") { DefaultValueFactory = _ => 64, Description = "Bytes to read" };
+        var port = PortOption();
+        var radioOpt = Common.RadioOption();
+        var cmd = new Command("peek", "Read a raw address range from the radio and hex-dump it");
+        cmd.Arguments.Add(addrArg);
+        cmd.Options.Add(lenOpt); cmd.Options.Add(port); cmd.Options.Add(radioOpt);
+        cmd.SetAction(async (pr, ct) =>
+        {
+            var radio = Common.Resolve(pr.GetValue(radioOpt));
+            var text = pr.GetValue(addrArg)!;
+            uint address = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                ? Convert.ToUInt32(text[2..], 16) : Convert.ToUInt32(text, 16);
+            int length = pr.GetValue(lenOpt);
+
+            var runs = new RunManager();
+            var run = runs.CreateRun(radio.Model, "dev");
+            var outcome = RunOutcome.Failed;
+            try
+            {
+                await using var session = await RadioSession.OpenAsync(radio, pr.GetValue(port), run, ct);
+                await session.IdentifyAsync(ct);
+                if (session.Protocol is not Plugmatic.Radios.D878uv.Protocol.D878uvProtocol anytone)
+                    throw new CliError($"peek is only implemented for AnyTone radios so far.", 1);
+
+                var data = await anytone.ReadRegionAsync(session.Link, address, length, null, "peek", ct);
+                for (int i = 0; i < data.Length; i += 16)
+                {
+                    var row = data.AsSpan(i, Math.Min(16, data.Length - i));
+                    var ascii = new string([.. row.ToArray().Select(b => b is >= 0x20 and < 0x7F ? (char)b : '.')]);
+                    Console.WriteLine($"{address + (uint)i:X8}  {Convert.ToHexString(row),-32}  {ascii}");
+                }
+                run.WriteArtifact("peek.bin", data);
+                outcome = RunOutcome.Success;
+                return 0;
+            }
+            catch (CliError e) { Console.Error.WriteLine(e.Message); return e.ExitCode; }
+            catch (Exception e) { Console.Error.WriteLine($"peek failed: {e.Message}"); return 3; }
+            finally { runs.Finalize(run, outcome); }
+        });
+        return cmd;
+    }
+
     // ---------------------------------------------------------------- decode
 
     private static Command BuildDecode()
     {
         var file = new Argument<string>("file") { Description = "Image (.bin) or CPS .data file" };
+        var radioOpt = Common.RadioOption();
         var cmd = new Command("decode", "Run the native codec against an image; print IR summary + warnings");
-        cmd.Arguments.Add(file);
+        cmd.Arguments.Add(file); cmd.Options.Add(radioOpt);
         cmd.SetAction((pr, _) =>
         {
+            var radio = Common.Resolve(pr.GetValue(radioOpt));
             var path = pr.GetValue(file)!;
             if (!File.Exists(path)) throw new CliError($"Not found: {path}", 1);
             var bytes = File.ReadAllBytes(path);
-            if (bytes.Length != Dm32Image.Size && bytes.Length != Dm32Image.LegacySize)
-                throw new CliError(
-                    $"Unsupported container: {bytes.Length} bytes (expected 0x{Dm32Image.Size:X} wire image). " +
-                    "CPS .data mapping is not yet implemented — see dm32uv-format.md §13.", 1);
-            var ir = Dm32uvCodec.Instance.Decode(bytes);
+            var ir = radio.Codec.Decode(bytes);
             Console.WriteLine($"channels:    {ir.Channels.Count}");
             foreach (var (ch, i) in ir.Channels.Take(20).Select((c, i) => (c, i)))
                 Console.WriteLine($"  {i + 1,4}  {ch.Name,-16} rx {ch.RxFrequency}  tx {ch.TxFrequency}  " +
@@ -169,8 +219,9 @@ public static class DevCommands
     {
         var file = new Argument<string>("frames") { Description = "Hex frames file: one frame per line, '#' comments" };
         var port = PortOption();
+        var radioOpt = Common.RadioOption();
         var cmd = new Command("replay", "Send captured frames byte-exact (write-class frames require confirmation)");
-        cmd.Arguments.Add(file); cmd.Options.Add(port);
+        cmd.Arguments.Add(file); cmd.Options.Add(port); cmd.Options.Add(radioOpt);
         cmd.SetAction(async (pr, ct) =>
         {
             var lines = File.ReadAllLines(pr.GetValue(file)!)
@@ -192,12 +243,13 @@ public static class DevCommands
                     throw new CliError("Aborted.", 1);
             }
 
+            var radio = Common.Resolve(pr.GetValue(radioOpt));
             var runs = new RunManager();
-            var run = runs.CreateRun("dm32uv", "dev");
+            var run = runs.CreateRun(radio.Model, "dev");
             var outcome = RunOutcome.Failed;
             try
             {
-                await using var session = await RadioSession.OpenAsync(pr.GetValue(port), run, ct);
+                await using var session = await RadioSession.OpenAsync(radio, pr.GetValue(port), run, ct);
                 foreach (var frame in lines)
                 {
                     await session.Link.WriteAsync(frame, ct);
@@ -221,17 +273,19 @@ public static class DevCommands
         var runDir = new Argument<string>("read-run-dir") { Description = "A read/dev run directory containing read.bin or dump.bin" };
         var port = PortOption();
         var yes = new Option<bool>("--yes", "-y");
+        var radioOpt = Common.RadioOption();
         var cmd = new Command("writeback", "Ladder step 4: no-op write of that run's own image (full §7.5 sequence)");
-        cmd.Arguments.Add(runDir); cmd.Options.Add(port); cmd.Options.Add(yes);
+        cmd.Arguments.Add(runDir); cmd.Options.Add(port); cmd.Options.Add(yes); cmd.Options.Add(radioOpt);
         cmd.SetAction(async (pr, ct) =>
         {
+            var radio = Common.Resolve(pr.GetValue(radioOpt));
             var dir = pr.GetValue(runDir)!;
             var bin = new[] { "read.bin", "dump.bin", "pre-write.bin" }
                 .Select(f => Path.Combine(dir, f)).FirstOrDefault(File.Exists)
                 ?? throw new CliError($"No read.bin/dump.bin/pre-write.bin in {dir}.", 1);
             Console.WriteLine($"No-op writeback of {bin}");
             var source = new WriteFlow.Source(null, File.ReadAllBytes(bin), $"writeback {Path.GetFileName(bin)}");
-            return await WriteFlow.RunAsync(new RunManager(), pr.GetValue(port), source, pr.GetValue(yes), ct);
+            return await WriteFlow.RunAsync(radio, new RunManager(), pr.GetValue(port), source, pr.GetValue(yes), ct);
         });
         return cmd;
     }

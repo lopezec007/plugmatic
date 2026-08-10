@@ -1,7 +1,6 @@
 using Plugmatic.Core.Model;
 using Plugmatic.Core.Runs;
 using Plugmatic.Radios;
-using Plugmatic.Radios.Dm32uv.Format;
 
 namespace Plugmatic.Cli.Services;
 
@@ -15,21 +14,22 @@ public static class WriteFlow
     public sealed record Source(Codeplug? Ir, byte[]? RawImage, string Label);
 
     public static async Task<int> RunAsync(
-        IRunManager runs, string? portOption, Source source, bool assumeYes, CancellationToken ct)
+        IRadioDefinition radio, IRunManager runs, string? portOption, Source source, bool assumeYes,
+        CancellationToken ct)
     {
-        var codec = Dm32uvCodec.Instance;
-        var run = runs.CreateRun("dm32uv", "write");
+        var codec = radio.Codec;
+        var run = runs.CreateRun(radio.Model, "write");
         Console.WriteLine($"Run: {run.Directory}");
         var outcome = RunOutcome.Failed;
         try
         {
-            await using var session = await RadioSession.OpenAsync(portOption, run, ct);
+            await using var session = await RadioSession.OpenAsync(radio, portOption, run, ct);
 
             // 1. identify + model match (I2).
             var id = await session.IdentifyAsync(ct);
             run.Extra["radio"] = new System.Text.Json.Nodes.JsonObject
             {
-                ["model"] = "dm32uv", ["reportedId"] = id.Model, ["firmware"] = id.FirmwareVersion,
+                ["model"] = radio.Model, ["reportedId"] = id.Model, ["firmware"] = id.FirmwareVersion,
             };
             run.Extra["port"] = session.PortName;
             Console.WriteLine($"Radio: {id.Model}, firmware {id.FirmwareVersion}");
@@ -106,13 +106,13 @@ public static class WriteFlow
         catch (Exception e) when (e is not CliError)
         {
             Console.Error.WriteLine($"Write failed: {e.Message}");
-            PrintRecovery(run.Directory);
+            PrintRecovery(run.Directory, radio.Model);
             return 3;
         }
         catch (CliError e)
         {
             Console.Error.WriteLine(e.Message);
-            if (e.ExitCode == 3) PrintRecovery(run.Directory);
+            if (e.ExitCode == 3) PrintRecovery(run.Directory, radio.Model);
             return e.ExitCode;
         }
         finally
@@ -131,11 +131,11 @@ public static class WriteFlow
         await session.Protocol.WriteImageAsync(session.Link, image, ConsoleProgress(), ct);
     }
 
-    private static void PrintRecovery(string runDir)
+    private static void PrintRecovery(string runDir, string model)
     {
         Console.Error.WriteLine();
         Console.Error.WriteLine("Recovery: the radio's previous codeplug was archived before writing.");
-        Console.Error.WriteLine($"  plugmatic write --radio dm32uv --image {Path.Combine(runDir, "pre-write.bin")}");
+        Console.Error.WriteLine($"  plugmatic write --radio {model} --image {Path.Combine(runDir, "pre-write.bin")}");
         Console.Error.WriteLine("If the radio is unresponsive: power-cycle it, then run the command above.");
     }
 

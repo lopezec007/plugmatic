@@ -25,6 +25,7 @@
     <ProjectReference Include="..\..\src\Plugmatic.Radios\Plugmatic.Radios.csproj" />
     <ProjectReference Include="..\..\src\Plugmatic.Radios.Dm32uv\Plugmatic.Radios.Dm32uv.csproj" />
     <ProjectReference Include="..\..\src\Plugmatic.Cli\Plugmatic.Cli.csproj" />
+    <ProjectReference Include="..\..\src\Plugmatic.Radios.D878uv\Plugmatic.Radios.D878uv.csproj" />
   </ItemGroup>
 
 </Project>

@@ -4,6 +4,7 @@ using Plugmatic.Core;
 using Plugmatic.Core.Build;
 using Plugmatic.Core.Model;
 using Plugmatic.Core.Runs;
+using Plugmatic.Radios;
 using Plugmatic.Core.Validation;
 using Plugmatic.Radios.Dm32uv.Format;
 
@@ -16,7 +17,7 @@ public static class BuildCommand
     {
         var location = new Option<string>("--location") { Required = true };
         var format = new Option<string?>("--format");
-        var radio = new Option<string>("--radio") { DefaultValueFactory = _ => "dm32uv" };
+        var radio = Common.RadioOption();
         var profileOpt = new Option<string?>("--profile") { Description = "Profile name (in ~/Plugmatic/config/profiles or ./profiles) or a yaml path" };
         var radius = new Option<string?>("--radius") { Description = "Overrides the profile radius (60mi, 100km)" };
         var noNoaa = new Option<bool>("--no-noaa");
@@ -28,13 +29,13 @@ public static class BuildCommand
             cmd.Options.Add(o);
         cmd.SetAction(async (pr, ct) =>
         {
-            Common.RequireDm32uv(pr.GetValue(radio));
+            var def = Common.Resolve(pr.GetValue(radio));
             var profile = LoadProfile(pr.GetValue(profileOpt));
             if (pr.GetValue(noNoaa)) profile.Noaa = false;
             var radiusText = pr.GetValue(radius) ?? $"{profile.RadiusMi}mi";
 
             var runs = new RunManager();
-            var run = runs.CreateRun("dm32uv", "build");
+            var run = runs.CreateRun(def.Model, "build");
             var outcome = RunOutcome.Failed;
             try
             {
@@ -45,10 +46,10 @@ public static class BuildCommand
                 Console.WriteLine($"{repeaters.Count} repeaters in range.");
 
                 var (gmrsEnabled, ack) = GmrsPolicyStore.Get();
-                var builder = new CodeplugBuilder(Dm32uvCodec.Instance.Capabilities);   // settings read from config
+                var builder = new CodeplugBuilder(def.Codec.Capabilities);   // settings read from config
                 var result = builder.Build(repeaters, profile, new GmrsPolicy(gmrsEnabled, ack));
 
-                var errors = CodeplugValidator.Validate(result.Codeplug, Dm32uvCodec.Instance.Capabilities);
+                var errors = CodeplugValidator.Validate(result.Codeplug, def.Codec.Capabilities);
                 if (errors.Count > 0)
                 {
                     Console.Error.WriteLine("Validation failed:\n  " + string.Join("\n  ", errors));
@@ -81,7 +82,7 @@ public static class BuildCommand
                 Console.WriteLine($"GMRS TX: {(gmrsEnabled ? $"ENABLED (acknowledged {ack})" : "disabled - GMRS channels RX-only")}");
                 foreach (var note in result.Notes) Console.WriteLine($"note: {note}");
                 Console.WriteLine($"\n{path}");
-                Console.WriteLine($"Write it with: plugmatic write --radio dm32uv --plug {run.Directory}");
+                Console.WriteLine($"Write it with: plugmatic write --radio {def.Model} --plug {run.Directory}");
                 outcome = RunOutcome.Success;
                 return 0;
             }
