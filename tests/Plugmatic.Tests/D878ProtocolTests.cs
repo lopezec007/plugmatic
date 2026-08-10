@@ -221,11 +221,10 @@ public class D878ProtocolTests
     }
 
     [Fact]
-    public void Encoding_is_refused_while_the_format_doc_is_unverified()
+    public void Writing_stays_disabled_until_the_ladder_has_run()
     {
-        var ex = Assert.Throws<D878FormatException>(
-            () => D878uvCodec.Instance.Encode(new Plugmatic.Core.Model.Codeplug()));
-        Assert.Contains("not implemented yet", ex.Message);
+        // Encode exists and round-trips, but no write path is enabled for this radio yet:
+        // the format doc still carries VERIFY items and the ladder has not been walked.
         Assert.False(Plugmatic.Radios.D878uv.D878uvRadio.Instance.SupportsWrite);
     }
 }

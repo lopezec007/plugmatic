@@ -200,5 +200,15 @@ them keeps the write surface small.
 | 2026-08-10 | Channel record: BCD frequencies, offset+repeater mode, name 0x23, colour code 0x20 | **verified** |
 | 2026-08-10 | Radio ID record (BCD, name at 0x05) → 3217632 | **verified** |
 | 2026-08-10 | Contact record (name 0x01, BCD ID 0x23, inverted bitmap) | **verified** |
-| — | Scan-list and group-list record layouts | not decoded yet |
-| — | Any write | not attempted; `SupportsWrite` is false until encode exists and this doc is complete |
+| 2026-08-10 | Scan-list and group-list records, channel→list indices | **verified** |
+| 2026-08-10 | **Byte stability: three full reads, identical (same MD5)** | **verified — no volatile regions**, so `Compare` needs no masks |
+| 2026-08-10 | **Round trip `Encode(Decode(img), img) == img` on the real image** | **verified byte-exact** |
+| — | Any write to the radio | not attempted; `SupportsWrite` stays false until the ladder runs |
+
+**Encoding rule (learned twice, on both radios).** Several channel fields decode
+many-to-one: modes 1–3 all mean "digital", power 2–3 both mean "high", and the offset
+field is ignored on simplex channels. Writing the canonical value back therefore
+*changes bytes that already meant the right thing* — the first round-trip attempt
+rewrote every mode-3 channel to mode 1. The encoder compares the **decoded** value and
+leaves the record untouched when it already agrees, which is what makes the round trip
+byte-exact.

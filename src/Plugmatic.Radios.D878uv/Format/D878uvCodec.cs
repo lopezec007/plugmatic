@@ -30,11 +30,305 @@ public sealed class D878uvCodec : IRadioCodec
             new BandRange(Frequency.FromMHz(400), Frequency.FromMHz(480)),
         ]);
 
-    public byte[] Encode(Codeplug ir, ReadOnlyMemory<byte>? baseImage = null) =>
-        throw new D878FormatException(
-            "D878UV encoding is not implemented yet: every field in d878uv-format.md is still " +
-            "'verified: pending'. Reading and archiving work; writing stays disabled until the " +
-            "format doc is hardware-verified.");
+    /// <summary>
+    /// Encodes over a base image (the same-run pre-write read, which D7 always provides).
+    /// Records are written **only where a field's value actually differs** from what the
+    /// base already holds, so lossy encodings — power levels, the offset field that
+    /// simplex channels ignore — survive untouched and `Encode(Decode(img), img) == img`.
+    /// </summary>
+    public byte[] Encode(Codeplug ir, ReadOnlyMemory<byte>? baseImage = null)
+    {
+        if (baseImage is not { } b)
+            throw new D878FormatException(
+                "D878UV encoding requires a base image: the codeplug is a sparse region map with " +
+                "many undecoded areas that must be carried forward. The hardware write path always " +
+                "supplies the same-run pre-write read (D7).");
+        var image = b.ToArray();
+        if (image.Length != Layout.ImageSize)
+            throw new D878FormatException(
+                $"Base image must be 0x{Layout.ImageSize:X} bytes, got 0x{image.Length:X}.");
+
+        var span = image.AsSpan();
+        var contactIndex = EncodeContacts(span, ir);
+        var channelIndex = AssignChannelSlots(span, ir);
+        var scanIndex = EncodeScanLists(span, ir, channelIndex);
+        var groupIndex = EncodeGroupLists(span, ir, contactIndex);
+        EncodeChannels(span, ir, channelIndex, contactIndex, scanIndex, groupIndex);
+        EncodeZones(span, ir, channelIndex);
+        EncodeRadioId(span, ir);
+        return image;
+    }
+
+    // ---------------------------------------------------------------- slot allocation
+
+    private static bool IsAllocated(ReadOnlySpan<byte> image, uint bitmap, int index, bool inverted) =>
+        Layout.BitmapHas(image, bitmap, index) != inverted;
+
+    private static void SetAllocated(Span<byte> image, uint bitmap, int index, bool allocated, bool inverted)
+    {
+        int at = Layout.OffsetOf(bitmap) + index / 8;
+        int mask = 1 << (index % 8);
+        bool bit = allocated != inverted;                 // inverted tables store a cleared bit
+        image[at] = (byte)(bit ? image[at] | mask : image[at] & ~mask);
+    }
+
+    /// <summary>
+    /// Maps IR items onto record slots: reuse the base image's allocated slots in ascending
+    /// order first (so a decode/encode round trip is the identity), then take free slots, then
+    /// release any left over. Returns the slot for each IR item.
+    /// </summary>
+    private static int[] AssignSlots(Span<byte> image, uint bitmap, int maxItems, int needed, bool inverted)
+    {
+        if (needed > maxItems)
+            throw new D878FormatException($"{needed} items exceed the radio's limit of {maxItems}.");
+        var allocated = new List<int>();
+        for (int i = 0; i < maxItems; i++)
+            if (IsAllocated(image, bitmap, i, inverted)) allocated.Add(i);
+
+        var slots = new List<int>(allocated.Take(needed));
+        var used = new HashSet<int>(slots);
+        for (int i = 0; slots.Count < needed && i < maxItems; i++)
+            if (!IsAllocated(image, bitmap, i, inverted)) { slots.Add(i); used.Add(i); }
+
+        foreach (var slot in slots) SetAllocated(image, bitmap, slot, true, inverted);
+        foreach (var slot in allocated) if (!used.Contains(slot)) SetAllocated(image, bitmap, slot, false, inverted);
+        return [.. slots];
+    }
+
+    private static int[] AssignChannelSlots(Span<byte> image, Codeplug ir) =>
+        AssignSlots(image, Layout.ChannelBitmap, Layout.MaxChannels, ir.Channels.Count, inverted: false);
+
+    // ---------------------------------------------------------------- table encoders
+
+    private static Dictionary<string, int> EncodeContacts(Span<byte> image, Codeplug ir)
+    {
+        // Contact bitmap is inverted (cleared bit = allocated). [format §4, hw-verified]
+        var slots = AssignSlots(image, Layout.ContactBitmap, Layout.MaxContacts, ir.Contacts.Count, inverted: true);
+        var byName = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < ir.Contacts.Count; i++)
+        {
+            var contact = ir.Contacts[i];
+            var (_, offset) = Layout.ContactSlot(slots[i]);
+            var rec = image.Slice(offset, Layout.ContactRecordSize);
+            byte type = contact.Type switch { CallType.Private => 0, CallType.All => 2, _ => 1 };
+            if (rec[0] != type) rec[0] = type;
+            WriteNameIfChanged(rec.Slice(1, 16), contact.Name);
+            if (DecodeBcdId(rec[0x23..]) != contact.DmrId) EncodeBcdId(rec[0x23..], contact.DmrId);
+            byName.TryAdd(contact.Name, slots[i]);
+        }
+        return byName;
+    }
+
+    private static Dictionary<string, int> EncodeScanLists(Span<byte> image, Codeplug ir, int[] channelSlots)
+    {
+        var slots = AssignSlots(image, Layout.ScanListBitmap, Layout.MaxScanLists, ir.ScanLists.Count, inverted: false);
+        var byName = new Dictionary<string, int>(StringComparer.Ordinal);
+        var channelSlotByName = ChannelSlotByName(ir, channelSlots);
+        for (int i = 0; i < ir.ScanLists.Count; i++)
+        {
+            var list = ir.ScanLists[i];
+            var (_, offset) = Layout.ScanListSlot(slots[i]);
+            var rec = image.Slice(offset, Layout.ScanListSize);
+            WriteNameIfChanged(rec.Slice(0x0F, 16), list.Name);
+            int at = 0x20;
+            foreach (var member in list.ChannelNames)
+            {
+                if (!channelSlotByName.TryGetValue(member, out int ch)) continue;
+                if (at + 1 >= Layout.ScanListSize) break;
+                SetU16IfChanged(rec, at, (ushort)ch);
+                at += 2;
+            }
+            if (at + 1 < Layout.ScanListSize) SetU16IfChanged(rec, at, 0xFFFF);   // terminator; tail untouched
+            byName.TryAdd(list.Name, slots[i]);
+        }
+        return byName;
+    }
+
+    private static Dictionary<string, int> EncodeGroupLists(Span<byte> image, Codeplug ir, Dictionary<string, int> contacts)
+    {
+        var slots = AssignSlots(image, Layout.GroupListBitmap, Layout.MaxGroupLists, ir.RxGroupLists.Count, inverted: false);
+        var byName = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < ir.RxGroupLists.Count; i++)
+        {
+            var list = ir.RxGroupLists[i];
+            var rec = image.Slice(Layout.GroupListOffset(slots[i]), Layout.GroupListSize);
+            WriteNameIfChanged(rec.Slice(0x100, 16), list.Name);
+            int at = 0;
+            foreach (var member in list.ContactNames)
+            {
+                if (!contacts.TryGetValue(member, out int ci)) continue;
+                if (at + 4 > 0x100) break;
+                SetU32IfChanged(rec, at, (uint)ci);
+                at += 4;
+            }
+            if (at + 4 <= 0x100) SetU32IfChanged(rec, at, 0xFFFFFFFF);
+            byName.TryAdd(list.Name, slots[i]);
+        }
+        return byName;
+    }
+
+    private static void EncodeChannels(Span<byte> image, Codeplug ir, int[] slots,
+        Dictionary<string, int> contacts, Dictionary<string, int> scanLists, Dictionary<string, int> groupLists)
+    {
+        for (int i = 0; i < ir.Channels.Count; i++)
+        {
+            var ch = ir.Channels[i];
+            var (_, offset) = Layout.ChannelSlot(slots[i]);
+            var rec = image.Slice(offset, Layout.ChannelRecordSize);
+
+            if (DecodeBcdFrequency(rec).Hz != ch.RxFrequency.Hz) EncodeBcdFrequency(rec, ch.RxFrequency);
+
+            // TX is stored as a magnitude plus a repeater-mode selector; leave both alone when
+            // the pair already yields the right frequency (simplex records keep their filler).
+            int mode = rec[0x08] >> 6 & 0x3;
+            var current = mode switch
+            {
+                1 => new Frequency(DecodeBcdFrequency(rec).Hz + DecodeBcdFrequency(rec[4..]).Hz),
+                2 => new Frequency(DecodeBcdFrequency(rec).Hz - Math.Min(DecodeBcdFrequency(rec[4..]).Hz, DecodeBcdFrequency(rec).Hz)),
+                _ => DecodeBcdFrequency(rec),
+            };
+            if (current.Hz != ch.TxFrequency.Hz)
+            {
+                ulong rx = ch.RxFrequency.Hz, tx = ch.TxFrequency.Hz;
+                int newMode = tx == rx ? 0 : tx > rx ? 1 : 2;
+                EncodeBcdFrequency(rec[4..], new Frequency(tx == rx ? tx : tx > rx ? tx - rx : rx - tx));
+                rec[0x08] = (byte)(rec[0x08] & 0x3F | newMode << 6);
+            }
+
+            // These three fields decode many-to-one (modes 1-3 are all "digital", powers 2-3
+            // are both "high"). Compare the DECODED value and leave the record alone when it
+            // already means the right thing, or a round trip silently rewrites the radio's
+            // choice — e.g. turning every mode-3 channel into mode 1.
+            bool digitalNow = (rec[0x08] & 0x3) != 0;
+            if (digitalNow != ch is DigitalChannel)
+                SetBitsIfChanged(rec, 0x08, 0, 2, ch is DigitalChannel ? 1 : 0);
+
+            var powerNow = (rec[0x08] >> 2 & 0x3) switch
+            {
+                0 => PowerLevel.Low,
+                1 => PowerLevel.Medium,
+                _ => PowerLevel.High,
+            };
+            if (powerNow != ch.Power)
+                SetBitsIfChanged(rec, 0x08, 2, 2, ch.Power switch
+                {
+                    PowerLevel.Low => 0, PowerLevel.Medium => 1, _ => 2,
+                });
+
+            SetBitIfChanged(rec, 0x09, 5, ch.TxPermit == TxPermit.Inhibited);
+            if (ch is AnalogChannel analog && (rec[0x08] >> 4 & 0x3) != 0 != analog.WideBandwidth)
+                SetBitsIfChanged(rec, 0x08, 4, 2, analog.WideBandwidth ? 1 : 0);
+            if (ch is DigitalChannel digital)
+            {
+                if (rec[0x20] != digital.ColorCode) rec[0x20] = (byte)digital.ColorCode;
+                SetBitIfChanged(rec, 0x21, 0, digital.TimeSlot == TimeSlot.TS2);
+                uint contactIdx = digital.TxContactName is { } tc && contacts.TryGetValue(tc, out int ci)
+                    ? (uint)ci : BinaryPrimitives.ReadUInt32LittleEndian(rec[0x14..]);
+                SetU32IfChanged(rec, 0x14, contactIdx);
+                byte gl = digital.RxGroupListName is { } g && groupLists.TryGetValue(g, out int gi)
+                    ? (byte)gi : (byte)0xFF;
+                if (rec[0x1C] != gl) rec[0x1C] = gl;
+            }
+            byte sl = ch.ScanListName is { } s && scanLists.TryGetValue(s, out int si) ? (byte)si : (byte)0xFF;
+            if (rec[0x1B] != sl) rec[0x1B] = sl;
+            WriteNameIfChanged(rec.Slice(0x23, 16), ch.Name);
+        }
+    }
+
+    private static void EncodeZones(Span<byte> image, Codeplug ir, int[] channelSlots)
+    {
+        var slots = AssignSlots(image, Layout.ZoneBitmap, Layout.MaxZones, ir.Zones.Count, inverted: false);
+        var channelSlotByName = ChannelSlotByName(ir, channelSlots);
+        for (int i = 0; i < ir.Zones.Count; i++)
+        {
+            var zone = ir.Zones[i];
+            WriteNameIfChanged(image.Slice(Layout.ZoneNameOffset(slots[i]), Layout.ZoneNameSize), zone.Name);
+            var list = image.Slice(Layout.ZoneChannelsOffset(slots[i]), Layout.ZoneChannelListSize);
+            int at = 0;
+            foreach (var member in zone.ChannelNames)
+            {
+                if (!channelSlotByName.TryGetValue(member, out int ch)) continue;
+                if (at + 1 >= Layout.ZoneChannelListSize) break;
+                SetU16IfChanged(list, at, (ushort)ch);
+                at += 2;
+            }
+            if (at + 1 < Layout.ZoneChannelListSize) SetU16IfChanged(list, at, 0xFFFF);
+        }
+    }
+
+    private static void EncodeRadioId(Span<byte> image, Codeplug ir)
+    {
+        if (ir.Settings.RadioId == 0) return;                 // never zero the radio's own ID
+        for (int i = 0; i < Layout.MaxRadioIds; i++)
+        {
+            if (!Layout.BitmapHas(image, Layout.RadioIdBitmap, i)) continue;
+            var rec = image.Slice(Layout.RadioIdOffset(i), Layout.RadioIdSize);
+            if (DecodeBcdId(rec) != ir.Settings.RadioId) EncodeBcdId(rec, ir.Settings.RadioId);
+            if (ir.Settings.Callsign.Length > 0) WriteNameIfChanged(rec.Slice(5, 16), ir.Settings.Callsign);
+            return;
+        }
+    }
+
+    private static Dictionary<string, int> ChannelSlotByName(Codeplug ir, int[] slots)
+    {
+        var map = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < ir.Channels.Count && i < slots.Length; i++) map.TryAdd(ir.Channels[i].Name, slots[i]);
+        return map;
+    }
+
+    // ---------------------------------------------------------------- write-if-changed helpers
+
+    private static void WriteNameIfChanged(Span<byte> field, string name)
+    {
+        if (ReadName(field) == name) return;
+        field.Clear();
+        System.Text.Encoding.ASCII.GetBytes(name.Length > field.Length ? name[..field.Length] : name).CopyTo(field);
+    }
+
+    private static void SetU16IfChanged(Span<byte> rec, int offset, ushort value)
+    {
+        if (BinaryPrimitives.ReadUInt16LittleEndian(rec[offset..]) != value)
+            BinaryPrimitives.WriteUInt16LittleEndian(rec[offset..], value);
+    }
+
+    private static void SetU32IfChanged(Span<byte> rec, int offset, uint value)
+    {
+        if (BinaryPrimitives.ReadUInt32LittleEndian(rec[offset..]) != value)
+            BinaryPrimitives.WriteUInt32LittleEndian(rec[offset..], value);
+    }
+
+    private static void SetBitsIfChanged(Span<byte> rec, int offset, int lowBit, int width, int value)
+    {
+        int mask = ((1 << width) - 1) << lowBit;
+        int updated = rec[offset] & ~mask | (value << lowBit) & mask;
+        if (updated != rec[offset]) rec[offset] = (byte)updated;
+    }
+
+    private static void SetBitIfChanged(Span<byte> rec, int offset, int bit, bool value) =>
+        SetBitsIfChanged(rec, offset, bit, 1, value ? 1 : 0);
+
+    /// <summary>Inverse of <see cref="DecodeBcdFrequency"/>. [format §3]</summary>
+    internal static void EncodeBcdFrequency(Span<byte> field, Frequency frequency)
+    {
+        ulong value = frequency.Hz / 10;
+        for (int i = 3; i >= 0; i--)
+        {
+            int pair = (int)(value % 100);
+            field[i] = (byte)(pair / 10 << 4 | pair % 10);
+            value /= 100;
+        }
+    }
+
+    /// <summary>Inverse of <see cref="DecodeBcdId"/>. [format §4]</summary>
+    internal static void EncodeBcdId(Span<byte> field, uint id)
+    {
+        for (int i = 3; i >= 0; i--)
+        {
+            int pair = (int)(id % 100);
+            field[i] = (byte)(pair / 10 << 4 | pair % 10);
+            id /= 100;
+        }
+    }
 
     public Codeplug Decode(ReadOnlyMemory<byte> imageBytes)
     {
@@ -49,8 +343,8 @@ public sealed class D878uvCodec : IRadioCodec
         // Scan and group lists first: channels reference them by index. [format §4]
         var scanListNames = DecodeScanLists(image, ir);
         var groupListNames = DecodeGroupLists(image, ir, contactIndexToName);
-        DecodeChannels(image, ir, contactIndexToName, scanListNames, groupListNames);
-        DecodeZones(image, ir);
+        var channelNameBySlot = DecodeChannels(image, ir, contactIndexToName, scanListNames, groupListNames);
+        DecodeZones(image, ir, channelNameBySlot);
         return ir;
     }
 
@@ -144,8 +438,8 @@ public sealed class D878uvCodec : IRadioCodec
     /// <summary>Channel members are stored as 0-based indices; the IR references names.</summary>
     private static string ChannelRef(int index) => $"@{index}";
 
-    private static void DecodeChannels(ReadOnlySpan<byte> image, Codeplug ir, Dictionary<uint, string> contacts,
-        Dictionary<int, string> scanLists, Dictionary<int, string> groupLists)
+    private static Dictionary<int, string> DecodeChannels(ReadOnlySpan<byte> image, Codeplug ir,
+        Dictionary<uint, string> contacts, Dictionary<int, string> scanLists, Dictionary<int, string> groupLists)
     {
         var nameByIndex = new Dictionary<int, string>();
         for (int i = 0; i < Layout.MaxChannels; i++)
@@ -167,6 +461,7 @@ public sealed class D878uvCodec : IRadioCodec
                     && int.TryParse(list.ChannelNames[n][1..], out int idx)
                     && nameByIndex.TryGetValue(idx, out var chName))
                     list.ChannelNames[n] = chName;
+        return nameByIndex;
     }
 
     private static Channel DecodeChannel(ReadOnlySpan<byte> rec, int index, Dictionary<uint, string> contacts)
@@ -212,7 +507,7 @@ public sealed class D878uvCodec : IRadioCodec
         return ch;
     }
 
-    private static void DecodeZones(ReadOnlySpan<byte> image, Codeplug ir)
+    private static void DecodeZones(ReadOnlySpan<byte> image, Codeplug ir, Dictionary<int, string> channelNameBySlot)
     {
         for (int i = 0; i < Layout.MaxZones; i++)
         {
@@ -224,9 +519,10 @@ public sealed class D878uvCodec : IRadioCodec
             {
                 ushort chIndex = BinaryPrimitives.ReadUInt16LittleEndian(list[(n * 2)..]);
                 if (chIndex == 0xFFFF) break;
-                if (chIndex < ir.Channels.Count) zone.ChannelNames.Add(ir.Channels[chIndex].Name);
+                if (channelNameBySlot.TryGetValue(chIndex, out var chName)) zone.ChannelNames.Add(chName);
             }
-            if (zone.ChannelNames.Count > 0) ir.Zones.Add(zone);
+            // Allocated-but-empty zones are kept so slot assignment round-trips.
+            ir.Zones.Add(zone);
         }
     }
 
