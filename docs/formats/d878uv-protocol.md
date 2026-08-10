@@ -139,9 +139,9 @@ So either this firmware requires a step neither project implements, or their Any
 write paths are stale for the D878UVII+.
 
 **What would unblock it:** a USB capture of the official AnyTone CPS writing a
-codeplug to this radio (§3.3 passive capture — USBPcap + Wireshark on Windows, or a
-com0com logging bridge). Diffing that byte stream against §5 will show the missing
-step immediately. Until then `D878uvRadio.SupportsWrite` stays **false** and
+codeplug to this radio (§3.3 passive capture). Diffing that byte stream against §5
+will show the missing step immediately. Step-by-step instructions for producing the
+capture: **`docs/d878uv-cps-write-capture.md`**. Until then `D878uvRadio.SupportsWrite` stays **false** and
 `plugmatic write --radio d878uv` refuses.
 
 **Why the ladder caught this:** an identical-bytes writeback — the conventional
