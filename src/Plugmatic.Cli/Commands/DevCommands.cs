@@ -16,6 +16,7 @@ public static class DevCommands
         dev.Subcommands.Add(BuildIdentify());
         dev.Subcommands.Add(BuildDump());
         dev.Subcommands.Add(BuildPeek());
+        dev.Subcommands.Add(BuildWriteTest());
         dev.Subcommands.Add(BuildDecode());
         dev.Subcommands.Add(BuildDiffBin());
         dev.Subcommands.Add(BuildReplay());
@@ -143,6 +144,116 @@ public static class DevCommands
             }
             catch (CliError e) { Console.Error.WriteLine(e.Message); return e.ExitCode; }
             catch (Exception e) { Console.Error.WriteLine($"peek failed: {e.Message}"); return 3; }
+            finally { runs.Finalize(run, outcome); }
+        });
+        return cmd;
+    }
+
+    // ---------------------------------------------------------------- writetest
+
+    /// <summary>
+    /// Smallest possible write-class validation: read one 16-byte chunk, write the very
+    /// same bytes back, read again and compare. Proves framing, checksum and ACK with no
+    /// semantic change even if every byte lands. Targets an unallocated record by default,
+    /// so the radio does not use the content either way.
+    /// </summary>
+    private static Command BuildWriteTest()
+    {
+        var port = PortOption();
+        var addrOpt = new Option<string?>("--address")
+        { Description = "Target address; defaults to the last (unallocated) channel slot" };
+        var probeByteOpt = new Option<int>("--probe-offset")
+        { DefaultValueFactory = _ => -1, Description = "Mutate only this byte of the chunk (default: whole chunk)" };
+        var keepOpt = new Option<bool>("--keep")
+        { Description = "Leave the probe pattern in place (target is unallocated filler) to test commit-on-close" };
+        var proveOpt = new Option<bool>("--prove")
+        { Description = "Also write a probe pattern, confirm it landed, then restore the original" };
+        var cmd = new Command("writetest", "Ladder step 4a: write one chunk back byte-identical and verify");
+        cmd.Options.Add(port); cmd.Options.Add(addrOpt); cmd.Options.Add(proveOpt); cmd.Options.Add(keepOpt); cmd.Options.Add(probeByteOpt);
+        cmd.SetAction(async (pr, ct) =>
+        {
+            var radio = Common.Resolve("d878uv");
+            uint address = pr.GetValue(addrOpt) is { } t
+                ? Convert.ToUInt32(t.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? t[2..] : t, 16)
+                : Plugmatic.Radios.D878uv.Format.Layout.ChannelSlot(
+                      Plugmatic.Radios.D878uv.Format.Layout.MaxChannels - 1).Address;
+
+            var runs = new RunManager();
+            var run = runs.CreateRun(radio.Model, "dev");
+            var outcome = RunOutcome.Failed;
+            try
+            {
+                await using var session = await RadioSession.OpenAsync(radio, pr.GetValue(port), run, ct);
+                await session.IdentifyAsync(ct);
+                var proto = (Plugmatic.Radios.D878uv.Protocol.D878uvProtocol)session.Protocol;
+
+                var before = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
+                run.WriteArtifact("before.bin", before);
+                Console.WriteLine($"Address 0x{address:X8} currently reads: {Convert.ToHexString(before)}");
+                Console.WriteLine("This writes those exact bytes back — no value changes, whatever happens.");
+                Console.Write("Type WRITE to send one 16-byte frame: ");
+                if (Console.ReadLine()?.Trim() != "WRITE")
+                {
+                    outcome = RunOutcome.Aborted;
+                    Console.WriteLine("Aborted; nothing sent.");
+                    return 1;
+                }
+
+                await proto.WriteChunkAsync(session.Link, address, before, ct);
+                var after = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
+                run.WriteArtifact("after.bin", after);
+
+                bool same = before.AsSpan().SequenceEqual(after);
+                Console.WriteLine($"After write:  {Convert.ToHexString(after)}");
+                if (!same)
+                {
+                    Console.WriteLine("FAIL — memory changed; the write framing is wrong. Do not proceed.");
+                    return 3;
+                }
+                Console.WriteLine("Identical write accepted.");
+
+                // An identical write proves nothing if the radio simply ignored us: mutate,
+                // confirm the change landed, then restore. Same unallocated slot throughout.
+                bool proved = false, restored = false;
+                if (pr.GetValue(proveOpt))
+                {
+                    var probe = (byte[])before.Clone();
+                    int only = pr.GetValue(probeByteOpt);
+                    if (only >= 0 && only < 16) probe[only] ^= 0x5A;   // single-byte mutation
+                    else Array.Fill(probe, (byte)0x5A);
+                    await proto.WriteChunkAsync(session.Link, address, probe, ct);
+                    var mutated = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
+                    proved = mutated.AsSpan().SequenceEqual(probe);
+                    Console.WriteLine($"Probe write:  {Convert.ToHexString(mutated)} — " +
+                                      (proved ? "writes take effect" : "radio IGNORED the write"));
+
+                    if (pr.GetValue(keepOpt))
+                    {
+                        restored = true;   // deliberately left in place for the next session's read
+                        Console.WriteLine("Probe left in place (--keep) to test whether writes commit on close.");
+                    }
+                    else
+                    {
+                        await proto.WriteChunkAsync(session.Link, address, before, ct);
+                        var final = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
+                        restored = final.AsSpan().SequenceEqual(before);
+                        Console.WriteLine($"Restored:     {Convert.ToHexString(final)} — " +
+                                          (restored ? "original bytes back" : "RESTORE FAILED"));
+                    }
+                }
+
+                bool ok = same && (!pr.GetValue(proveOpt) || (proved && restored));
+                Console.WriteLine(ok ? "PASS — write path validated." : "FAIL — see above.");
+                run.Extra["writeTest"] = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["address"] = $"0x{address:X8}", ["identicalWriteOk"] = same,
+                    ["mutationLanded"] = proved, ["restored"] = restored,
+                };
+                outcome = ok ? RunOutcome.Success : RunOutcome.Failed;
+                return ok ? 0 : 3;
+            }
+            catch (CliError e) { Console.Error.WriteLine(e.Message); return e.ExitCode; }
+            catch (Exception e) { Console.Error.WriteLine($"writetest failed: {e.Message}"); return 3; }
             finally { runs.Finalize(run, outcome); }
         });
         return cmd;

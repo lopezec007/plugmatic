@@ -111,6 +111,46 @@ radio: 06
   frames are never retried (a half-applied retry is worse than a clean failure —
   same rule as the DM-32UV, protocol §8).
 
+### 5.1 BLOCKED — this radio ACKs writes and does not apply them (hw, 2026-08-10)
+
+**Status: write support is not possible from the currently documented protocol.**
+On this unit (D878UV2, firmware **V101**) a correctly framed 16-byte write is
+acknowledged with `0x06` and then **has no effect on memory**.
+
+Evidence, in the order it was gathered:
+
+| Test | Target | Result |
+|---|---|---|
+| Write identical bytes back | unallocated channel slot 0x00FC07C0 | ACK, memory unchanged — *looks* like a pass |
+| Write `5A`×16 | same address | **ACK, memory still `FF`** |
+| Write `5A`×16, close session, reopen, re-read | unallocated slot 0x00841200 | **still `FF`** — not a commit-on-close effect |
+| Flip one padding byte | **allocated** channel record 0x00800020 | **ACK, unchanged** — not an allocation effect |
+
+Ruled out: address alignment (all targets 16-byte aligned), unbacked flash (an
+allocated record behaves the same), deferred commit (survives session close and
+reopen), stream desync (subsequent reads validate address echo and checksum
+normally, so the radio consumed exactly our frame and replied one byte), and a wrong
+checksum (the same routine validates every read response the radio sends).
+
+Both references write exactly this frame and nothing else — `qdmr`
+`AnytoneInterface::write` and dmrconfig `serial_write_region` were re-read
+specifically to look for a missing prepare/commit/unlock step, and there is none.
+So either this firmware requires a step neither project implements, or their AnyTone
+write paths are stale for the D878UVII+.
+
+**What would unblock it:** a USB capture of the official AnyTone CPS writing a
+codeplug to this radio (§3.3 passive capture — USBPcap + Wireshark on Windows, or a
+com0com logging bridge). Diffing that byte stream against §5 will show the missing
+step immediately. Until then `D878uvRadio.SupportsWrite` stays **false** and
+`plugmatic write --radio d878uv` refuses.
+
+**Why the ladder caught this:** an identical-bytes writeback — the conventional
+"no-op write" first step — passes here for the wrong reason, because writing `FF`
+over `FF` is indistinguishable from doing nothing. Only mutating a byte and reading
+it back distinguishes "accepted and applied" from "politely ignored". **A no-op
+writeback is not sufficient evidence that a write path works.** Apply this to every
+future radio.
+
 ## 6. Safety rules (D14 / I8)
 
 - No bootloader, DFU or firmware-update sequence appears in this document, and none may

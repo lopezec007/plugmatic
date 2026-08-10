@@ -160,7 +160,7 @@ public sealed class D878uvProtocol : IRadioProtocol
     }
 
     /// <summary>Write one 16-byte chunk. Bounds-checked (I8). Never retried. [protocol §5/§6]</summary>
-    internal async Task WriteChunkAsync(ISerialLink link, uint address, ReadOnlyMemory<byte> data, CancellationToken ct)
+    public async Task WriteChunkAsync(ISerialLink link, uint address, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
         if (data.Length != WriteChunk)
             throw new D878ProtocolException($"Writes must be {WriteChunk} bytes, got {data.Length}.");
