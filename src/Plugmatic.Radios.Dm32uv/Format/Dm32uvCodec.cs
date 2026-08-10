@@ -205,8 +205,15 @@ public sealed class Dm32uvCodec : IRadioCodec
         ch.TxPermit = GetBit(rec, 0x18, 3) ? TxPermit.Inhibited : TxPermit.Allowed;
         ch.Power = (PowerLevel)Math.Min(GetBits(rec, 0x18, 1, 2), 2);
         ch.SquelchLevel = GetBits(rec, 0x1C, 4, 4);
-        int sli = GetBits(rec, 0x19, 2, 4);                                  // 1-based nibble
-        if (sli > 0 && sli <= ir.ScanLists.Count) ch.ScanListName = ir.ScanLists[sli - 1].Name;
+        // Scan list: 1-based LITERAL index in bits 0-5; 0 = none, bit 7 is bandwidth.
+        // [format §4, hw-verified: radio wrote 0x89 = wide|list 9]
+        int sli = GetBits(rec, 0x19, 0, 6);
+        ch.ScanListName = sli switch
+        {
+            0 => null,
+            _ when sli <= ir.ScanLists.Count => ir.ScanLists[sli - 1].Name,
+            _ => $"#{sli}",     // dangling index: keep it addressable so re-encode is byte-exact
+        };
         ch.RawRecord = rec.ToArray();
         return ch;
     }
@@ -407,9 +414,17 @@ public sealed class Dm32uvCodec : IRadioCodec
                 .Where(n => n == CurrentChannelMarker || channelIndexByName.ContainsKey(n))
                 .Take(Layout.MaxChannelsPerScanList).ToList();
             rec[0x0B] = (byte)members.Count;
+            ushort digitalMask = 0;
             for (int n = 0; n < members.Count; n++)
-                SetU16(rec, 0x18 + n * 2, (ushort)(members[n] == CurrentChannelMarker
-                    ? 0 : channelIndexByName[members[n]] + 1));
+            {
+                bool marker = members[n] == CurrentChannelMarker;
+                int chIndex = marker ? -1 : channelIndexByName[members[n]];
+                SetU16(rec, 0x18 + n * 2, (ushort)(marker ? 0 : chIndex + 1));
+                // Per-member "this member is a digital channel" flag. Without it the radio
+                // will not scan DMR members at all. [format §8, hw-verified 10/10]
+                if (!marker && ir.Channels[chIndex] is DigitalChannel) digitalMask |= (ushort)(1 << n);
+            }
+            SetU16(rec, 0x16, digitalMask);
             if (sl.RawRecord is null)
                 for (int n = members.Count; n < Layout.MaxChannelsPerScanList; n++)
                     SetU16(rec, 0x18 + n * 2, 0);
@@ -461,10 +476,15 @@ public sealed class Dm32uvCodec : IRadioCodec
         SetBits(rec, 0x1C, 4, 4, Math.Clamp(ch.SquelchLevel, 0, 15));
 
         int sli = 0;
-        if (ch.ScanListName is not null && scanIndexByName.TryGetValue(ch.ScanListName, out int si)
-            && si <= Layout.MaxChannelReferencableScanList)
-            sli = si + 1;
-        SetBits(rec, 0x19, 2, 4, sli);
+        if (ch.ScanListName is { } slName)
+        {
+            if (scanIndexByName.TryGetValue(slName, out int si)
+                && si < Layout.MaxChannelReferencableScanList)
+                sli = si + 1;
+            else if (slName.StartsWith('#') && int.TryParse(slName[1..], out int raw) && raw is > 0 and < 64)
+                sli = raw;
+        }
+        SetBits(rec, 0x19, 0, 6, sli);
 
         switch (ch)
         {
@@ -476,6 +496,10 @@ public sealed class Dm32uvCodec : IRadioCodec
                 break;
             case DigitalChannel d:
                 SetBits(rec, 0x1A, 4, 2, (int)d.Admit);
+                // DMR carries no CTCSS/DCS: the radio stores the "none" sentinel, not zeros
+                // (0x0000 would decode as CTCSS 0.0 Hz). [format §4, hw-verified]
+                SetU16(rec, 0x21, ToneCodec.None);
+                SetU16(rec, 0x23, ToneCodec.None);
                 SetBit(rec, 0x1D, 4, d.TimeSlot == TimeSlot.TS2);            // [format §4, C3]
                 SetBits(rec, 0x1D, 0, 4, Math.Clamp(d.ColorCode, 0, 15));
                 int gli = 0;

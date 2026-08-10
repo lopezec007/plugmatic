@@ -67,7 +67,8 @@ public static class Layout
     public const int MaxScanLists = 31;
     public const int MaxChannelsPerScanList = 16;   // entries 0x18-0x37 = 16 x u16 (hw-verified)
     /// <summary>Channel record's scan-list nibble is 4 bits, 1-based: only lists 0-14 are addressable per-channel.</summary>
-    public const int MaxChannelReferencableScanList = 14;
+    /// <summary>Channel records address scan lists with a 6-bit literal index, so all 31 fit.</summary>
+    public const int MaxChannelReferencableScanList = MaxScanLists;
 
     // [format §3] zones
     public const int ZoneBankHeader = 0x10;

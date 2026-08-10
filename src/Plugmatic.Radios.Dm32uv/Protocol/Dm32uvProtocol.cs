@@ -224,8 +224,14 @@ public sealed class Dm32uvProtocol : IRadioProtocol
     {
         var map = await GetAddressMapAsync(link, ct);
         var img = new Dm32Image();                           // absent blocks 0xFF [format §1]
+        // Every mapped block is read: a backup that skips blocks is not a backup.
         var inWindow = map.Where(kv => kv.Key >= Dm32Image.WindowStart && kv.Key < Dm32Image.Size)
                           .OrderBy(kv => kv.Value).ToList(); // read in physical order [protocol §6.4]
+        if (inWindow.Count != map.Count)
+            throw new Dm32ProtocolException(
+                $"Radio maps {map.Count} blocks but only {inWindow.Count} fall inside the image window " +
+                $"[0x{Dm32Image.WindowStart:X}, 0x{Dm32Image.Size:X}); refusing a partial read. " +
+                "Update Dm32Image/format doc §1.");
         int done = 0;
         foreach (var (virt, phys) in inWindow)
         {

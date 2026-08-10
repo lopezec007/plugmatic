@@ -94,6 +94,29 @@ public class ProtocolTests
     }
 
     [Fact]
+    public async Task Read_covers_blocks_beyond_the_decoded_area()
+    {
+        // Regression: an image window that stopped at 0x68 silently dropped 11 of this
+        // radio's 107 mapped blocks from reads, backups and writes.
+        var img = new Dm32Image(Dm32uvCodec.Instance.Encode(CodecRoundTripTests.SampleIr()));
+        img.AllocateBlock(0x7C).Fill(0x5A);
+        img.AllocateBlock(0x01).Fill(0x11);
+        var radio = new FakeRadio();
+        radio.LoadVirtualImage(img.Bytes);
+
+        var proto = FastProtocol();
+        await proto.IdentifyAsync(radio, CancellationToken.None);
+        var read = await proto.ReadImageAsync(radio, null, CancellationToken.None);
+
+        var back = new Dm32Image(read);
+        Assert.True(back.BlockPresent(0x7C));
+        Assert.True(back.BlockPresent(0x01));
+        Assert.Equal(0x5A, read[0x7C * Dm32Image.BlockSize]);
+        var cmp = Dm32uvCodec.Instance.Compare(img.Bytes, read);
+        Assert.True(cmp.Equal, string.Join("\n", cmp.Differences));
+    }
+
+    [Fact]
     public async Task Nak_on_write_aborts_with_readable_error()
     {
         var radio = LoadedRadio();

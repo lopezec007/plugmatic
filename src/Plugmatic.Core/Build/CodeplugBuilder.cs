@@ -216,7 +216,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
     /// </summary>
     private void BuildScanLists(Codeplug plug, List<string> notes)
     {
-        const int maxReferencable = 15;
+        int maxReferencable = caps.MaxScanLists;
         var listNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var zone in plug.Zones)
         {

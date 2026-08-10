@@ -108,7 +108,7 @@ public static class DevCommands
             var path = pr.GetValue(file)!;
             if (!File.Exists(path)) throw new CliError($"Not found: {path}", 1);
             var bytes = File.ReadAllBytes(path);
-            if (bytes.Length != Dm32Image.Size)
+            if (bytes.Length != Dm32Image.Size && bytes.Length != Dm32Image.LegacySize)
                 throw new CliError(
                     $"Unsupported container: {bytes.Length} bytes (expected 0x{Dm32Image.Size:X} wire image). " +
                     "CPS .data mapping is not yet implemented — see dm32uv-format.md §13.", 1);

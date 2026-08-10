@@ -10,7 +10,16 @@ Known open conflicts between sources are tracked in §12 and mirrored in
 
 ---
 
-## 1. Image container (`*.bin` artifacts, codec in/out)
+## 1. Image container
+
+**Block-space size (hw-verified 2026-08-10):** the metadata byte can address virtual
+blocks 0x01–0xFF (0x00 means "unallocated", so block 0 never exists), and this radio
+maps **107 blocks: 0x01–0x48, 0x4B, 0x4F–0x67, 0x69–0x6E, 0x74, 0x75, 0x7C**. An earlier
+image window of [0x03000,0x68000) silently dropped 11 of them from reads, backups and
+writes — the container now spans the full 0x100000 block space and the protocol layer
+refuses any read whose mapped blocks fall outside it. Blocks 0x69+ are not yet decoded;
+they round-trip verbatim through `RawBlocks`.
+ (`*.bin` artifacts, codec in/out)
 
 The codec operates on the radio's **virtual codeplug address space** (see protocol doc
 §6.3 for how physical blocks map to virtual addresses).
@@ -108,7 +117,24 @@ Channel record — multi-byte ints LE, frequencies §11.1, tones §11.2:
 | 0x10 | RX frequency | BCD8 LE, units of 10 Hz |
 | 0x14 | TX frequency | BCD8 LE; **0xFFFFFFFF = no TX frequency** |
 | 0x18 | bits 7–4: channel type (0 FM, 1 DMR, 2 FM-fixed, 3 DMR-fixed) · bit 3: **RX-only ("forbid TX")** · bits 2–1: power (0 Low, 1 Medium, 2 High) · bit 0: lone worker | |
-| 0x19 | bit 7: FM bandwidth (0 = 12.5 kHz narrow, 1 = 25 kHz wide) · bit 6: scan add (dm32-spec; qdmr silent) · bits 5–2: scan list index, **1-based nibble, 0 = none** · bits 1–0: reserved | |
+| 0x19 | bit 7: FM bandwidth (0 = 12.5 kHz narrow, 1 = 25 kHz wide) · **bits 6–0: scan list index, 1-based LITERAL value, 0 = none** (hw-verified — see below; qdmr's "1-based nibble at bits 5–2" is wrong and produces index×4) | |
+
+**Scan-list index encoding (hw-verified 2026-08-10, decisive test).** The user changed
+three channels' scan lists on the radio's own keypad and the radio rewrote exactly one
+byte per channel, all at record offset 0x19:
+
+| channel | we wrote | radio wrote | meaning |
+|---|---|---|---|
+| ch32 (DMR, list 1) | 0x04 | **0x01** | literal 1 |
+| ch34 (DMR, list 1) | 0x04 | **0x01** | literal 1 |
+| ch175 (analog wide, list 9) | 0xA4 | **0x89** | 0x80 wide + literal 9 |
+
+Writing the index shifted into bits 5–2 makes the radio read it as index×4: channels
+assigned list 1 scan list 4, list 2 scan list 8, and any product ≥ the list count shows
+no scan list at all. Indices the radio cannot resolve (≥ list count) are decoded to the
+pseudo-name `#N` so re-encoding stays byte-exact. Note the user's pre-plugmatic codeplug
+carries the same ×4 pattern (values 4, 8, 12 …), i.e. whatever wrote it had this same
+bug — do not treat that image as evidence for the shifted reading.
 | 0x1A | bit 7: prevent talkaround · bits 5–4: admit criterion (0 always, 1 channel-free, 2 tone/CC-match, 3 tone-mismatch) · bit 2: RX DMR-APRS · bits 1–0: reserved | |
 | 0x1B | bit 7: emergency notification · bit 6: emergency ACK · bits 4–0: emergency system index, 1-based, 0 = none | |
 | 0x1C | bits 7–4: squelch level 0–15 · bits 3–2: (DMR-)APRS mode · bits 1–0: reserved | |
@@ -238,6 +264,13 @@ hw-verified semantics (factory-golden, CPS-written): the count byte at 0x0B incl
 the current-channel marker; slots **beyond the count contain stale bytes** the CPS
 never cleared — byte-faithful re-encode must preserve them and let the count govern.
 Example from our radio: count 12 = marker + channels 17–27, slots 12–14 stale.
+
+**+0x16 u16 LE — per-member "member is a digital channel" bitmask** (bit *i* set when
+member slot *i* holds a DMR channel; bit 0 is the current-channel marker and is always
+clear). Hardware-verified against all 10 factory lists, including mixed lists
+('Ham Simplex' = 0x3000, exactly its two DMR simplex members). **A zero mask on a list
+of DMR members makes scanning stop immediately** — the radio will not scan members it
+does not know are digital. The codec computes this from the member channels.
 
 **Fresh-record defaults (hw-observed):** every CPS-written analog list carries
 settings bytes `+0x0C..+0x17` = `00 06 00 01 00 00 00 00 00 14 00 00` (i.e. +0x0D=0x06,

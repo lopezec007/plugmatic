@@ -164,6 +164,90 @@ public class CodecRoundTripTests
     }
 
     [Fact]
+    public void Channel_scan_list_index_is_a_literal_not_a_shifted_nibble()
+    {
+        // Hardware evidence: the radio itself wrote 0x01 for list 1 (DMR) and 0x89 for
+        // list 9 on a wide analog channel. Shifting into bits 5-2 made it scan list×4.
+        var ir = SampleIr();
+        for (int i = ir.ScanLists.Count; i < 9; i++)
+            ir.ScanLists.Add(new ScanList { Name = $"L{i + 1}", ChannelNames = ["W0ABC VHF"] });
+        ir.Channels[1].ScanListName = ir.ScanLists[0].Name;    // DMR channel  -> list 1
+        var noaa = (AnalogChannel)ir.Channels[2];
+        noaa.WideBandwidth = true;
+        noaa.ScanListName = ir.ScanLists[8].Name;              // wide analog  -> list 9
+
+        var image = new Dm32Image(Dm32uvCodec.Instance.Encode(ir));
+        byte Byte19(int chIndex)
+        {
+            var (block, off) = Layout.ChannelSlot(chIndex);
+            return image.ReadBlock(block)[off + 0x19];
+        }
+        Assert.Equal(0x01, Byte19(1));
+        Assert.Equal(0x89, Byte19(2));
+    }
+
+    [Fact]
+    public void Dangling_scan_list_index_round_trips()
+    {
+        // Images written by other tools reference lists that do not exist; those bytes
+        // must survive decode/encode untouched or the write gate rejects a restore.
+        var codec = Dm32uvCodec.Instance;
+        var image = new Dm32Image(codec.Encode(SampleIr()));
+        var (block, off) = Layout.ChannelSlot(0);
+        image.Block(block)[off + 0x19] = 0x84;                 // wide + index 4, only 1 list exists
+
+        var decoded = codec.Decode(image.Bytes);
+        Assert.Equal("#4", decoded.Channels[0].ScanListName);
+        var cmp = codec.Compare(image.Bytes, codec.Encode(decoded));
+        Assert.True(cmp.Equal, string.Join("\n", cmp.Differences));
+    }
+
+    [Fact]
+    public void Scan_list_marks_which_members_are_digital()
+    {
+        // Zero mask on DMR members stops scanning dead on the radio. [format §8, hw-verified]
+        var ir = SampleIr();
+        ir.ScanLists[0].ChannelNames.Clear();
+        ir.ScanLists[0].ChannelNames.Add(ScanList.CurrentChannelMarker);   // bit 0 always clear
+        ir.ScanLists[0].ChannelNames.Add("W0ABC VHF");                     // analog  -> bit 1 clear
+        ir.ScanLists[0].ChannelNames.Add("DMR CO 1");                      // digital -> bit 2 set
+        ir.ScanLists[0].ChannelNames.Add("NOAA WX1");                      // analog  -> bit 3 clear
+
+        var image = Dm32uvCodec.Instance.Encode(ir);
+        var rec = new Dm32Image(image).ReadBlock(Layout.ScanListBlock)
+            .Slice(Layout.ScanListsOffset, Layout.ScanListRecordSize);
+        Assert.Equal(4, rec[0x0B]);                                        // count includes the marker
+        Assert.Equal(0x0004, rec[0x16] | rec[0x17] << 8);
+    }
+
+    [Fact]
+    public void Legacy_sized_images_are_accepted_and_padded()
+    {
+        // Backups archived before the window covered all 256 blocks must stay restorable.
+        var full = Dm32uvCodec.Instance.Encode(SampleIr());
+        var legacy = full.AsSpan(0, Dm32Image.LegacySize).ToArray();
+        var decoded = Dm32uvCodec.Instance.Decode(legacy);
+        Assert.Equal(3, decoded.Channels.Count);
+        Assert.Equal(Dm32Image.Size, new Dm32Image(legacy).Bytes.Length);
+        Assert.False(new Dm32Image(legacy).BlockPresent(0x7C));            // padding reads as absent
+    }
+
+    [Fact]
+    public void Blocks_beyond_the_decoded_area_round_trip_verbatim()
+    {
+        // Blocks 0x69+ are undecoded on this radio; they must survive encode untouched.
+        var codec = Dm32uvCodec.Instance;
+        var img = new Dm32Image(codec.Encode(SampleIr()));
+        img.AllocateBlock(0x7C).Fill(0xA5);
+        var original = img.Bytes;
+
+        var reEncoded = codec.Encode(codec.Decode(original));
+        Assert.True(new Dm32Image(reEncoded).BlockPresent(0x7C));
+        var cmp = codec.Compare(original, reEncoded);
+        Assert.True(cmp.Equal, string.Join("\n", cmp.Differences));
+    }
+
+    [Fact]
     public void Many_channels_span_multiple_banks()
     {
         var ir = new Codeplug { Settings = new GeneralSettings { RadioId = 1, Callsign = "T" } };

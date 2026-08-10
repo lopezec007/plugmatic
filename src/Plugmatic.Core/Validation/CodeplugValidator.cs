@@ -72,7 +72,8 @@ public static class CodeplugValidator
 
         foreach (var ch in plug.Channels)
         {
-            if (ch.ScanListName is { } sl && !scanListNames.Contains(sl))
+            // "#N" is a dangling raw index preserved from a decoded image, not a reference.
+            if (ch.ScanListName is { } sl && !scanListNames.Contains(sl) && !IsRawScanListRef(sl))
                 Err($"channel '{ch.Name}': unknown scan list '{sl}'");
             if (ch is DigitalChannel d)
             {
@@ -142,6 +143,9 @@ public static class CodeplugValidator
 
         return errors;
     }
+
+    public static bool IsRawScanListRef(string name) =>
+        name.StartsWith('#') && int.TryParse(name.AsSpan(1), out int n) && n is > 0 and < 64;
 
     public static bool IsRawTalkgroupRef(string name) =>
         name.StartsWith("TG", StringComparison.Ordinal)
