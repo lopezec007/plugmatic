@@ -145,9 +145,42 @@ contact index; apparently a house style worth expecting on any new radio.)
   Talkgroup contacts carry type 1; the meaning of 0 and 2 is **VERIFY**. (qdmr's
   `contactsPerBlock = 4` / 0x190 grouping is not needed for a flat 0x64 stride and is
   left unreconciled.)
-- **Scan list** *i*: `scanListBanks + (i / 16) × 0x40000 + (i % 16) × 0x200` —
-  **not decoded yet**; the bitmap reports 2 lists on this radio.
-- **Group list** *i*: `groupLists + i × 0x200` — **not decoded yet**; bitmap reports 1.
+- **Scan list** *i* — **verified: hw**: `scanListBanks + (i / 16) × 0x40000 +
+  (i % 16) × 0x200`, record 0x200 bytes:
+
+  | Off | Field |
+  |---|---|
+  | 0x01 | priority-channel select |
+  | 0x02 / 0x04 | primary / secondary priority channel, u16, 0xFFFF = none |
+  | 0x06 / 0x08 | look-back time A / B, u16 |
+  | 0x0A / 0x0C | drop-out delay / dwell time, u16 |
+  | 0x0E | revert channel |
+  | **0x0F** | **name, 16 chars NUL-terminated** |
+  | **0x20** | **members: u16 LE 0-based channel indices, stride 2, 0xFFFF terminates** |
+
+  Hardware agrees with qdmr on every offset here. This radio: list 0 `Main` with
+  channels 0–7, list 1 `GMRS` with channels 100–129 — matching the channel bitmap's
+  second allocated run exactly.
+
+- **Group list** *i* — **verified: hw**: `groupLists + i × 0x200`; **members are u32 LE
+  contact indices from 0x00** (stride 4, 0xFFFFFFFF terminates, 64 max) and the
+  **name is at 0x100** (16 chars). This radio: one list, `Group List 1`, one member.
+
+- **Channel → list references** — **verified: hw**: channel byte **0x1B = scan-list
+  index**, **0x1C = RX group-list index**, both **0-based** with **0xFF = none**.
+  Self-consistent on this radio: channels 1–8 carry 0x00 and are exactly the members of
+  scan list 0, channels 101+ carry 0x01 and are the members of list 1.
+
+- **Tones** — the channel's signalling-mode bits (0x09: bits 1–0 RX, bits 3–2 TX)
+  select which tone field applies: 0 none, 1 CTCSS (index at 0x0A tx / 0x0B rx),
+  2 DCS (u16 at 0x0C tx / 0x0E rx). **VERIFY** — every channel in this codeplug has
+  mode 0, so the CTCSS index table and DCS bit layout remain unconfirmed; decoding
+  without the mode gate produced bogus tones from unused bytes.
+
+- **Channel TX contact index** (u32 at 0x14): reads **0 on every channel of this
+  radio**, including analog ones. That is suspicious for a real codeplug — a per-channel
+  talkgroup assignment should vary — so treat the offset as **VERIFY** and do not rely
+  on it until a codeplug with known per-channel talkgroups is available.
 
 ## 5. Safety
 

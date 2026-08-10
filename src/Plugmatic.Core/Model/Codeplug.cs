@@ -1,3 +1,5 @@
+using YamlDotNet.Serialization;
+
 namespace Plugmatic.Core.Model;
 
 public enum TxPermit { Allowed, Inhibited }
@@ -20,6 +22,7 @@ public sealed class Codeplug
     /// Opaque regions captured at decode time (virtual block address -> raw 4 KiB block),
     /// carried back verbatim on encode. Never serialized to YAML. [format §2 "passthrough"]
     /// </summary>
+    [YamlIgnore]
     public Dictionary<uint, byte[]> RawBlocks { get; set; } = [];
 
     public Channel? FindChannel(string name) => Channels.FirstOrDefault(c => c.Name == name);
@@ -45,6 +48,7 @@ public sealed class Contact
     public CallType Type { get; set; } = CallType.Group;
     public uint DmrId { get; set; }
     /// <summary>See Channel.RawRecord.</summary>
+    [YamlIgnore]
     public byte[]? RawRecord { get; set; }
 }
 
@@ -54,6 +58,7 @@ public sealed class RxGroupList
     /// <summary>Member talkgroup contact names (resolved to DMR IDs at encode).</summary>
     public List<string> ContactNames { get; set; } = [];
     /// <summary>See Channel.RawRecord.</summary>
+    [YamlIgnore]
     public byte[]? RawRecord { get; set; }
 }
 
@@ -67,6 +72,7 @@ public abstract class Channel
     public int SquelchLevel { get; set; } = 3;   // 0-15
     public string? ScanListName { get; set; }
     /// <summary>Original binary record captured at decode; preserves unmodeled bits on re-encode. Not serialized.</summary>
+    [YamlIgnore]
     public byte[]? RawRecord { get; set; }
 }
 
@@ -93,6 +99,7 @@ public sealed class Zone
     public string Name { get; set; } = "";
     public List<string> ChannelNames { get; set; } = [];
     /// <summary>See Channel.RawRecord.</summary>
+    [YamlIgnore]
     public byte[]? RawRecord { get; set; }
 }
 
@@ -104,5 +111,6 @@ public sealed class ScanList
     public string Name { get; set; } = "";
     public List<string> ChannelNames { get; set; } = [];
     /// <summary>See Channel.RawRecord.</summary>
+    [YamlIgnore]
     public byte[]? RawRecord { get; set; }
 }

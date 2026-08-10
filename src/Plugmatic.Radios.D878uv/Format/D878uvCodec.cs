@@ -46,7 +46,10 @@ public sealed class D878uvCodec : IRadioCodec
         var ir = new Codeplug();
         DecodeRadioIds(image, ir);
         var contactIndexToName = DecodeContacts(image, ir);
-        DecodeChannels(image, ir, contactIndexToName);
+        // Scan and group lists first: channels reference them by index. [format §4]
+        var scanListNames = DecodeScanLists(image, ir);
+        var groupListNames = DecodeGroupLists(image, ir, contactIndexToName);
+        DecodeChannels(image, ir, contactIndexToName, scanListNames, groupListNames);
         DecodeZones(image, ir);
         return ir;
     }
@@ -92,14 +95,78 @@ public sealed class D878uvCodec : IRadioCodec
         return byIndex;
     }
 
-    private static void DecodeChannels(ReadOnlySpan<byte> image, Codeplug ir, Dictionary<uint, string> contacts)
+    /// <summary>Scan list: name at 0x0F, u16 LE channel indices from 0x20. [format §4, hw-verified]</summary>
+    private static Dictionary<int, string> DecodeScanLists(ReadOnlySpan<byte> image, Codeplug ir)
     {
+        var names = new Dictionary<int, string>();
+        for (int i = 0; i < Layout.MaxScanLists; i++)
+        {
+            if (!Layout.BitmapHas(image, Layout.ScanListBitmap, i)) continue;
+            var (_, offset) = Layout.ScanListSlot(i);
+            var rec = image.Slice(offset, Layout.ScanListSize);
+            var name = ReadName(rec.Slice(0x0F, 16));
+            var list = new ScanList { Name = name.Length > 0 ? name : $"Scan {i + 1}", RawRecord = rec.ToArray() };
+            for (int n = 0x20; n + 1 < Layout.ScanListSize; n += 2)
+            {
+                ushort member = BinaryPrimitives.ReadUInt16LittleEndian(rec[n..]);
+                if (member == 0xFFFF) break;
+                list.ChannelNames.Add(ChannelRef(member));
+            }
+            names[i] = list.Name;
+            ir.ScanLists.Add(list);
+        }
+        return names;
+    }
+
+    /// <summary>Group list: u32 LE contact indices from 0x00, name at 0x100. [format §4, hw-verified]</summary>
+    private static Dictionary<int, string> DecodeGroupLists(
+        ReadOnlySpan<byte> image, Codeplug ir, Dictionary<uint, string> contacts)
+    {
+        var names = new Dictionary<int, string>();
+        for (int i = 0; i < Layout.MaxGroupLists; i++)
+        {
+            if (!Layout.BitmapHas(image, Layout.GroupListBitmap, i)) continue;
+            var rec = image.Slice(Layout.GroupListOffset(i), Layout.GroupListSize);
+            var name = ReadName(rec.Slice(0x100, 16));
+            var list = new RxGroupList { Name = name.Length > 0 ? name : $"Group {i + 1}", RawRecord = rec.ToArray() };
+            for (int n = 0; n < 0x100; n += 4)
+            {
+                uint member = BinaryPrimitives.ReadUInt32LittleEndian(rec[n..]);
+                if (member == 0xFFFFFFFF) break;
+                list.ContactNames.Add(contacts.TryGetValue(member, out var cn) ? cn : $"#{member}");
+            }
+            names[i] = list.Name;
+            ir.RxGroupLists.Add(list);
+        }
+        return names;
+    }
+
+    /// <summary>Channel members are stored as 0-based indices; the IR references names.</summary>
+    private static string ChannelRef(int index) => $"@{index}";
+
+    private static void DecodeChannels(ReadOnlySpan<byte> image, Codeplug ir, Dictionary<uint, string> contacts,
+        Dictionary<int, string> scanLists, Dictionary<int, string> groupLists)
+    {
+        var nameByIndex = new Dictionary<int, string>();
         for (int i = 0; i < Layout.MaxChannels; i++)
         {
             if (!Layout.BitmapHas(image, Layout.ChannelBitmap, i)) continue;
             var (_, offset) = Layout.ChannelSlot(i);
-            ir.Channels.Add(DecodeChannel(image.Slice(offset, Layout.ChannelRecordSize), i, contacts));
+            var ch = DecodeChannel(image.Slice(offset, Layout.ChannelRecordSize), i, contacts);
+            byte scanIdx = image[offset + 0x1B], groupIdx = image[offset + 0x1C];
+            if (scanIdx != 0xFF && scanLists.TryGetValue(scanIdx, out var sl)) ch.ScanListName = sl;
+            if (ch is DigitalChannel dch && groupIdx != 0xFF && groupLists.TryGetValue(groupIdx, out var gl))
+                dch.RxGroupListName = gl;
+            nameByIndex[i] = ch.Name;
+            ir.Channels.Add(ch);
         }
+        // Resolve the placeholder channel references now that every name is known.
+        foreach (var list in ir.ScanLists)
+            for (int n = 0; n < list.ChannelNames.Count; n++)
+                if (list.ChannelNames[n].StartsWith('@')
+                    && int.TryParse(list.ChannelNames[n][1..], out int idx)
+                    && nameByIndex.TryGetValue(idx, out var chName))
+                    list.ChannelNames[n] = chName;
     }
 
     private static Channel DecodeChannel(ReadOnlySpan<byte> rec, int index, Dictionary<uint, string> contacts)
@@ -127,8 +194,12 @@ public sealed class D878uvCodec : IRadioCodec
             : new AnalogChannel
             {
                 WideBandwidth = (rec[0x08] >> 4 & 0x3) != 0,
-                TxTone = ToneCodec.Decode(rec[0x0A], BinaryPrimitives.ReadUInt16LittleEndian(rec[0x0C..])),
-                RxTone = ToneCodec.Decode(rec[0x0B], BinaryPrimitives.ReadUInt16LittleEndian(rec[0x0E..])),
+                // Signalling mode selects which tone field applies; without it, unused
+                // CTCSS/DCS bytes decode as bogus tones. [format §3]
+                TxTone = ToneCodec.Decode(rec[0x09] >> 2 & 0x3, rec[0x0A],
+                                          BinaryPrimitives.ReadUInt16LittleEndian(rec[0x0C..])),
+                RxTone = ToneCodec.Decode(rec[0x09] & 0x3, rec[0x0B],
+                                          BinaryPrimitives.ReadUInt16LittleEndian(rec[0x0E..])),
             };
 
         ch.Name = ReadName(rec[0x23..]);
@@ -231,15 +302,16 @@ internal static class ToneCodec
         2257, 2291, 2336, 2418, 2503, 2541,
     ];
 
-    public static SelectiveCall Decode(byte ctcssIndex, ushort dcsCode)
+    /// <summary>
+    /// signallingMode: 0 = none, 1 = CTCSS (index), 2 = DCS (code). Anything else is
+    /// treated as none. **VERIFY** — no channel in the reference codeplug uses a tone,
+    /// so the CTCSS index table and the DCS bit layout are still unconfirmed.
+    /// </summary>
+    public static SelectiveCall Decode(int signallingMode, byte ctcssIndex, ushort dcsCode) => signallingMode switch
     {
-        if (dcsCode is not 0 and not 0xFFFF)
-        {
-            bool inverted = (dcsCode & 0x8000) != 0;
-            int octal = dcsCode & 0x01FF;
-            return SelectiveCall.Parse($"D{Convert.ToString(octal, 8).PadLeft(3, '0')}{(inverted ? "I" : "N")}");
-        }
-        if (ctcssIndex < CtcssTenths.Length) return SelectiveCall.Ctcss(CtcssTenths[ctcssIndex] / 10m);
-        return SelectiveCall.None;
-    }
+        1 when ctcssIndex < CtcssTenths.Length => SelectiveCall.Ctcss(CtcssTenths[ctcssIndex] / 10m),
+        2 when dcsCode is not 0xFFFF => SelectiveCall.Parse(
+            $"D{Convert.ToString(dcsCode & 0x01FF, 8).PadLeft(3, '0')}{((dcsCode & 0x8000) != 0 ? "I" : "N")}"),
+        _ => SelectiveCall.None,
+    };
 }
