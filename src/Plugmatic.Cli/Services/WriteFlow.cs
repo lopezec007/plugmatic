@@ -13,6 +13,9 @@ public static class WriteFlow
 {
     public sealed record Source(Codeplug? Ir, byte[]? RawImage, string Label);
 
+    /// <summary>How long to wait for the radio's port to re-enumerate between phases.</summary>
+    private static readonly TimeSpan ReopenTimeout = TimeSpan.FromSeconds(30);
+
     public static async Task<int> RunAsync(
         IRadioDefinition radio, IRunManager runs, string? portOption, Source source, bool assumeYes,
         CancellationToken ct)
@@ -21,27 +24,67 @@ public static class WriteFlow
         var run = runs.CreateRun(radio.Model, "write");
         Console.WriteLine($"Run: {run.Directory}");
         var outcome = RunOutcome.Failed;
-        try
-        {
-            await using var session = await RadioSession.OpenAsync(radio, portOption, run, ct);
 
-            // 1. identify + model match (I2).
-            var id = await session.IdentifyAsync(ct);
+        // Some radios discard every staged write the moment they see a read, so read,
+        // write and verify each need their own session. Everything else keeps the single
+        // session this flow has always used. [d878uv-protocol.md §5.1]
+        bool perPhase = radio.SeparateReadWriteSessions;
+        RadioSession? shared = null;
+        bool first = true;
+
+        async Task<RadioSession> BeginAsync()
+        {
+            if (!perPhase)
+            {
+                if (shared is null)
+                {
+                    shared = await RadioSession.OpenAsync(radio, portOption, run, ct);
+                    await IdentifyAndRecordAsync(shared);
+                }
+                return shared;
+            }
+            var session = first
+                ? await RadioSession.OpenAsync(radio, portOption, run, ct)
+                : await RadioSession.ReopenAsync(radio, portOption, run, ReopenTimeout, ct);
+            await IdentifyAndRecordAsync(session);
+            return session;
+        }
+
+        // Ends the phase. For the per-phase radios this is also the commit point, so a
+        // failure here is reported rather than swallowed by teardown.
+        async Task EndAsync(RadioSession session)
+        {
+            if (!perPhase) return;
+            try { await session.Protocol.EndSessionAsync(session.Link, ct); }
+            finally { await session.DisposeAsync(); }
+        }
+
+        async Task IdentifyAndRecordAsync(RadioSession session)
+        {
+            var id = await session.IdentifyAsync(ct);           // I2 model gate, every session
+            if (!first) return;
+            first = false;
             run.Extra["radio"] = new System.Text.Json.Nodes.JsonObject
             {
                 ["model"] = radio.Model, ["reportedId"] = id.Model, ["firmware"] = id.FirmwareVersion,
             };
             run.Extra["port"] = session.PortName;
             Console.WriteLine($"Radio: {id.Model}, firmware {id.FirmwareVersion}");
+        }
 
-            // 2. Unconditional fresh read -> pre-write artifacts (D7). No skip flag exists.
+        try
+        {
+            // 1. Unconditional fresh read -> pre-write artifacts (D7). No skip flag exists.
             Console.WriteLine("Reading current codeplug (pre-write backup)...");
-            var preWrite = await session.Protocol.ReadImageAsync(session.Link, ConsoleProgress(), ct);
+            var readSession = await BeginAsync();
+            var preWrite = await readSession.Protocol.ReadImageAsync(readSession.Link, ConsoleProgress(), ct);
+            await EndAsync(readSession);
+
             var preWritePath = run.WriteArtifact("pre-write.bin", preWrite);
             var preIr = codec.Decode(preWrite);
             run.WriteArtifact("pre-write.yaml", IrYaml.Serialize(preIr));
 
-            // 3. Produce generated.bin + round-trip gate (I3).
+            // 2. Produce generated.bin + round-trip gate (I3).
             byte[] generated;
             if (source.Ir is { } ir)
             {
@@ -67,7 +110,7 @@ public static class WriteFlow
             run.WriteArtifact("generated.bin", generated);
             if (source.Ir is not null) run.WriteArtifact("generated.yaml", IrYaml.Serialize(source.Ir));
 
-            // 4. Summary diff + confirmation.
+            // 3. Summary diff + confirmation.
             var genIr = codec.Decode(generated);
             Console.WriteLine();
             Console.WriteLine($"About to write ({source.Label}):");
@@ -83,12 +126,18 @@ public static class WriteFlow
                 }
             }
 
-            // 5. Write (I1: pre-write artifact validated here, same run).
-            await WriteHardwareAsync(session, generated, preWritePath, ct);
+            // 4. Write (I1: pre-write artifact validated here, same run).
+            var writeSession = await BeginAsync();
+            await WriteHardwareAsync(writeSession, generated, preWrite, preWritePath, ct);
+            await EndAsync(writeSession);           // the commit, for radios that stage writes
 
-            // 6. Read back and compare (masked).
+            // 5. Read back and compare (masked) — necessarily a new session on those radios,
+            //    because reading in the writing session would have discarded the write.
             Console.WriteLine("Reading back for verification...");
-            var postWrite = await session.Protocol.ReadImageAsync(session.Link, ConsoleProgress(), ct);
+            var verifySession = await BeginAsync();
+            var postWrite = await verifySession.Protocol.ReadImageAsync(verifySession.Link, ConsoleProgress(), ct);
+            await EndAsync(verifySession);
+
             run.WriteArtifact("post-write.bin", postWrite);
             var post = codec.Compare(generated, postWrite);
             run.Extra["verification"] = new System.Text.Json.Nodes.JsonObject
@@ -99,15 +148,10 @@ public static class WriteFlow
             Console.WriteLine(post.Equal
                 ? "Post-write verification: radio image matches (modulo masks)."
                 : "WARNING: post-write differences:\n  " + string.Join("\n  ", post.Differences.Take(20)));
+            if (!post.Equal) return 3;
 
             outcome = RunOutcome.Success;
             return 0;
-        }
-        catch (Exception e) when (e is not CliError)
-        {
-            Console.Error.WriteLine($"Write failed: {e.Message}");
-            PrintRecovery(run.Directory, radio.Model);
-            return 3;
         }
         catch (CliError e)
         {
@@ -115,20 +159,28 @@ public static class WriteFlow
             if (e.ExitCode == 3) PrintRecovery(run.Directory, radio.Model);
             return e.ExitCode;
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"Write failed: {e.Message}");
+            PrintRecovery(run.Directory, radio.Model);
+            return 3;
+        }
         finally
         {
+            if (shared is not null) await shared.DisposeAsync();
             runs.Finalize(run, outcome);
         }
     }
 
     /// <summary>I1 enforcement point: hardware write requires the same-run pre-write.bin.</summary>
-    private static async Task WriteHardwareAsync(RadioSession session, byte[] image, string preWriteBinPath, CancellationToken ct)
+    private static async Task WriteHardwareAsync(
+        RadioSession session, byte[] image, byte[] baseline, string preWriteBinPath, CancellationToken ct)
     {
         var fi = new FileInfo(preWriteBinPath);
         if (!fi.Exists || fi.Length == 0)
             throw new CliError("I1 violation: pre-write.bin missing or empty in this run; refusing to write.", 3);
         Console.WriteLine("Writing codeplug...");
-        await session.Protocol.WriteImageAsync(session.Link, image, ConsoleProgress(), ct);
+        await session.Protocol.WriteImageAsync(session.Link, image, baseline, ConsoleProgress(), ct);
     }
 
     private static void PrintRecovery(string runDir, string model)

@@ -15,6 +15,16 @@ public sealed class FakeAnytoneRadio : ISerialLink
     private readonly List<byte> _fromHost = [];
     private bool _program;
 
+    /// <summary>
+    /// Writes land here, not in <see cref="Memory"/>: this radio stages writes, commits
+    /// them on `END`, and throws the whole staging area away the moment it sees a read.
+    /// [d878uv-protocol.md §5.1]
+    /// </summary>
+    private readonly Dictionary<uint, byte> _staged = [];
+
+    /// <summary>Counts writes a read discarded — the §5.1 W3 trap, made visible to tests.</summary>
+    public int DiscardedWriteCount { get; private set; }
+
     public string Model { get; init; } = "D878UV2";
     public string Version { get; init; } = "V300";
     public Dictionary<uint, byte> Memory { get; } = [];
@@ -64,7 +74,15 @@ public sealed class FakeAnytoneRadio : ISerialLink
         if (_fromHost.Count == 0) return false;
 
         if (Starts("PROGRAM"u8)) { Take(7); Log.Add("PROGRAM"); _program = true; Send(0x51, 0x58, 0x06); return true; }
-        if (Starts("END"u8)) { Take(3); Log.Add("END"); _program = false; Send(0x06); return true; }
+        if (Starts("END"u8))
+        {
+            Take(3); Log.Add("END");
+            foreach (var (addr, value) in _staged) Memory[addr] = value;   // END is the commit
+            _staged.Clear();
+            _program = false;
+            Send(0x06);
+            return true;
+        }
         if (_fromHost[0] == 0x02)
         {
             Take(1); Log.Add("identify");
@@ -84,6 +102,9 @@ public sealed class FakeAnytoneRadio : ISerialLink
             int len = req[5];
             Log.Add($"R:{addr:X8}+{len}");
             if (!_program) return true;
+            // A read discards everything staged, whatever address it targets. [§5.1 W3]
+            DiscardedWriteCount += _staged.Count;
+            _staged.Clear();
             var frame = new byte[len + 8];
             frame[0] = (byte)'W';
             frame[1] = req[1]; frame[2] = req[2]; frame[3] = req[3]; frame[4] = req[4];
@@ -104,7 +125,8 @@ public sealed class FakeAnytoneRadio : ISerialLink
             uint addr = (uint)(frame[1] << 24 | frame[2] << 16 | frame[3] << 8 | frame[4]);
             Log.Add($"W:{addr:X8}+{len}");
             if (frame[6 + len] != D878uvProtocol.Checksum(frame, len)) { Send(0x15); return true; }
-            for (int i = 0; i < len; i++) Memory[addr + (uint)i] = frame[6 + i];
+            // Staged, not applied: only END makes these real. [§5.1 W1]
+            for (int i = 0; i < len; i++) _staged[addr + (uint)i] = frame[6 + i];
             Send(0x06);
             return true;
         }
@@ -221,10 +243,11 @@ public class D878ProtocolTests
     }
 
     [Fact]
-    public void Writing_stays_disabled_until_the_ladder_has_run()
+    public void Writing_stays_disabled_while_the_region_table_cannot_cover_an_erase_block()
     {
-        // Encode exists and round-trips, but no write path is enabled for this radio yet:
-        // the format doc still carries VERIFY items and the ladder has not been walked.
-        Assert.False(Plugmatic.Radios.D878uv.D878uvRadio.Instance.SupportsWrite);
+        // The protocol is proven; the region table is what blocks writes. See §5.4.
+        var radio = Plugmatic.Radios.D878uv.D878uvRadio.Instance;
+        Assert.False(radio.SupportsWrite);
+        Assert.True(radio.SeparateReadWriteSessions);
     }
 }

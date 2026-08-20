@@ -47,6 +47,49 @@ public sealed class RadioSession : IAsyncDisposable
         return session;
     }
 
+    /// <summary>
+    /// Open a session, waiting for the port to come back first. Radios that own their USB
+    /// stack (the AnyTone) drop and re-create their device node at the end of every
+    /// session, so a second session in the same run has to tolerate the node being absent
+    /// for a second or so rather than reporting "no serial ports found".
+    /// [d878uv-protocol.md §2]
+    /// </summary>
+    public static async Task<RadioSession> ReopenAsync(
+        IRadioDefinition radio, string? portOption, RunContext run, TimeSpan timeout, CancellationToken ct)
+    {
+        // The device node can linger for a moment after the radio drops it, so an open that
+        // succeeds immediately may be holding a stale node that vanishes on first use. The
+        // handshake is the real liveness check: retry open *and* handshake together.
+        var deadline = DateTime.UtcNow + timeout;
+        Exception? last = null;
+        await Task.Delay(SettleDelay, ct);
+        while (true)
+        {
+            RadioSession? session = null;
+            try
+            {
+                session = await OpenAsync(radio, portOption, run, ct);
+                await session.Protocol.IdentifyAsync(session.Link, ct);
+                return session;
+            }
+            catch (Exception e)
+            {
+                last = e;
+                if (session is not null) await session.DisposeAsync();
+                if (DateTime.UtcNow >= deadline) break;
+                await Task.Delay(500, ct);
+            }
+        }
+        throw new CliError(
+            $"The radio did not answer within {timeout.TotalSeconds:0}s of the previous session ending. " +
+            "It re-enumerates its USB device after every session; if it stays away, power-cycle it.\n" +
+            $"Last error: {last!.Message}",
+            last is CliError c ? c.ExitCode : 3);
+    }
+
+    /// <summary>Grace period for the radio's USB device to come back. [d878uv-protocol.md §2]</summary>
+    private static readonly TimeSpan SettleDelay = TimeSpan.FromMilliseconds(1200);
+
     /// <summary>Identify + model preflight. Mismatch = abort, no override (I2).</summary>
     public async Task<RadioIdentity> IdentifyAsync(CancellationToken ct)
     {

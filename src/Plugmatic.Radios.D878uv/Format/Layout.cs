@@ -54,6 +54,48 @@ public static class Layout
     public const uint Settings = 0x02500000;
     public const uint SettingsExtension = 0x02501400;
 
+    /// <summary>
+    /// Flash erase granularity. A write anywhere inside an aligned 0x40000 block erases the
+    /// **entire block** and reprograms only the bytes staged in that same session; every
+    /// other byte in the block comes back 0xFF. Measured on hardware: one 16-byte write at
+    /// 0x00888000 erased all 62 marks laid across 0x00880000-0x008BF000.
+    /// [d878uv-protocol.md §5.4]
+    /// </summary>
+    public const uint EraseBlockSize = 0x00040000;
+
+    /// <summary>Start address of the erase block containing `address`.</summary>
+    public static uint EraseBlockOf(uint address) => address & ~(EraseBlockSize - 1);
+
+    /// <summary>
+    /// How many bytes of the erase block starting at `blockStart` the region table
+    /// describes. Anything less than <see cref="EraseBlockSize"/> means writing that block
+    /// would erase codeplug bytes this project has never read and cannot put back.
+    /// </summary>
+    public static long CoveredBytesInBlock(uint blockStart)
+    {
+        long end = (long)blockStart + EraseBlockSize, covered = 0;
+        foreach (var region in Regions)
+        {
+            long lo = Math.Max(region.Address, blockStart);
+            long hi = Math.Min(region.End, end);
+            if (hi > lo) covered += hi - lo;
+        }
+        return covered;
+    }
+
+    /// <summary>
+    /// The radio keeps a 16-byte flash signature at the end of every 0x20000 half-block
+    /// (`FF FF FF FF 22 33 44 55 FF FF FF FF 55 55 AA AA`). It is firmware-managed, not
+    /// codeplug data: it is present in blocks Plugmatic has never written, and it is back
+    /// in place after an erase. Tools that ask "is this block empty?" must ignore it.
+    /// [d878uv-protocol.md §5.4]
+    /// </summary>
+    public const uint FlashMarkerStride = 0x20000;
+
+    /// <summary>True if `address` falls in a firmware flash signature. [see FlashMarkerStride]</summary>
+    public static bool IsFlashMarker(uint address) =>
+        (address & (FlashMarkerStride - 1)) >= FlashMarkerStride - 16;
+
     /// <summary>Region table in ascending address order — the canonical image layout. [format §2]</summary>
     public static readonly IReadOnlyList<Region> Regions = BuildRegions();
 

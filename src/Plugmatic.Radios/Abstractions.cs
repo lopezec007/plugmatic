@@ -26,6 +26,13 @@ public interface IRadioDefinition
     IReadOnlyList<string> KnownUsbIds { get; }
     /// <summary>False while the radio's codec cannot yet produce a writable image.</summary>
     bool SupportsWrite { get; }
+
+    /// <summary>
+    /// True when reads and writes cannot share one programming session, so the write flow
+    /// must read, write and verify in three separate sessions. The AnyTone discards every
+    /// staged write the moment it sees a read. [d878uv-protocol.md §5.1]
+    /// </summary>
+    bool SeparateReadWriteSessions => false;
 }
 
 /// <summary>Abstract serial link — the only seam between protocol code and real hardware.</summary>
@@ -54,7 +61,13 @@ public interface IRadioProtocol
 {
     Task<RadioIdentity> IdentifyAsync(ISerialLink link, CancellationToken ct);
     Task<byte[]> ReadImageAsync(ISerialLink link, IProgress<TransferProgress>? progress, CancellationToken ct);
-    Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image, IProgress<TransferProgress>? progress, CancellationToken ct);
+    /// <summary>
+    /// Write `image`. `baseline` is the image just read from this radio, when the caller
+    /// has one; implementations may use it to send only what changed. Passing null always
+    /// means "write everything".
+    /// </summary>
+    Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image, ReadOnlyMemory<byte>? baseline,
+                         IProgress<TransferProgress>? progress, CancellationToken ct);
     /// <summary>Reboot/close the programming session (safe to call after failures).</summary>
     Task EndSessionAsync(ISerialLink link, CancellationToken ct);
 }

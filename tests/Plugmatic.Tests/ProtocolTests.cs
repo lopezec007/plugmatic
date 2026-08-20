@@ -65,7 +65,7 @@ public class ProtocolTests
         ir.Zones[0].Name = "Loveland";
         var newImage = Dm32uvCodec.Instance.Encode(ir, image);
 
-        await proto.WriteImageAsync(radio, newImage, null, CancellationToken.None);
+        await proto.WriteImageAsync(radio, newImage, null, null, CancellationToken.None);
         var cmp = Dm32uvCodec.Instance.Compare(newImage, radio.VirtualImage());
         Assert.True(cmp.Equal, string.Join("\n", cmp.Differences));
     }
@@ -85,7 +85,7 @@ public class ProtocolTests
         img.AllocateBlock(0x03).Fill(0x11);
         var newImage = img.Bytes;
 
-        await proto.WriteImageAsync(radio, newImage, null, CancellationToken.None);
+        await proto.WriteImageAsync(radio, newImage, null, null, CancellationToken.None);
         var readBack = radio.VirtualImage();
         Assert.True(new Dm32Image(readBack).BlockPresent(0x03));
         var cmp = Dm32uvCodec.Instance.Compare(newImage, readBack);
@@ -125,7 +125,7 @@ public class ProtocolTests
         await proto.IdentifyAsync(radio, CancellationToken.None);
         var image = await proto.ReadImageAsync(radio, null, CancellationToken.None);
         var ex = await Assert.ThrowsAsync<Dm32ProtocolException>(
-            () => proto.WriteImageAsync(radio, image, null, CancellationToken.None));
+            () => proto.WriteImageAsync(radio, image, null, null, CancellationToken.None));
         Assert.Contains("NAK", ex.Message);
     }
 
@@ -139,7 +139,7 @@ public class ProtocolTests
         var image = await proto.ReadImageAsync(radio, null, CancellationToken.None);
         int writesBefore = radio.Log.Count(l => l.StartsWith("W:"));
         await Assert.ThrowsAsync<Dm32ProtocolException>(
-            () => proto.WriteImageAsync(radio, image, null, CancellationToken.None));
+            () => proto.WriteImageAsync(radio, image, null, null, CancellationToken.None));
         int writes = radio.Log.Count(l => l.StartsWith("W:")) - writesBefore;
         Assert.Equal(3, writes);   // 2 acked + the one that timed out; NO resend [protocol §8]
     }

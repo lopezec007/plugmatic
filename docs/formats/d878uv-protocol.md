@@ -28,6 +28,7 @@ The radio itself enumerates when powered on with the programming cable attached.
 | USB ID (this unit) | `28e9:018a` GD32 Virtual ComPort | verified: hw |
 | USB ID (older units) | `0483:5740` STM Virtual COM | source: dmrconfig; verified: no |
 | Flow control | none; DTR/RTS not required | source: dmrconfig; verified: hw |
+| Line coding | irrelevant to the radio | verified: hw — the CPS sets 921600 8N1 with DTR=0/RTS=1, Plugmatic uses 115200 with Linux's default DTR=1/RTS=1, and reads *and* writes behave identically either way. Ruled out as a cause of §5.2. |
 
 Because the port is the radio's own USB stack, unplugging or powering the radio off
 mid-session removes the device node outright — the transport layer must treat a
@@ -42,14 +43,21 @@ commands themselves.
 |---|---|---|---|
 | Enter program mode | `PROGRAM` (7 B, ASCII) | `51 58 06` = `"QX"` + ACK | retry ≤ 10×, 500 ms apart, flushing input each attempt |
 | Identify | `02` (1 B) | 16-byte radio-info record (§3) | must start `'I'` and end `0x06` |
-| Leave program mode | `END` (3 B, ASCII) | `06` | best-effort on teardown |
+| Leave program mode | `END` (3 B, ASCII) | `06` | **commits staged writes** (§5.1); best-effort only when nothing was written |
 
 (source: dmrconfig `serial_identify`/`serial_close` + qdmr `enter_program_mode`;
 verified: hw — both references agree byte-for-byte.)
 
 The radio displays a programming/PC indication while in program mode and returns to
 normal operation after `END`. **Always send `END`**: a session left open can leave the
-radio in program mode until it is power-cycled.
+radio in program mode until it is power-cycled, and after a write `END` is the only
+thing that makes the write real (§5.1).
+
+**The port re-enumerates after every session.** `END` (and any teardown) makes the
+radio drop and re-create its USB device, so `/dev/ttyACM*` disappears for roughly a
+second and comes back. Code that opens a second session must wait for the port to
+reappear and retry the handshake rather than treating the gap as a failure.
+(verified: hw.)
 
 ## 3. Identify response (16 bytes)
 
@@ -104,52 +112,151 @@ radio: 06
 - Identical framing to the read *response* — the same struct travels in both
   directions.
 - `ss` = 8-bit sum of `cmd[1 .. 5+len]` (address + length + data), as for reads.
-- **Write length is 16 bytes**, in both references, even though reads may be 64.
-  Plugmatic does not write any other length until hardware says otherwise.
-  (source: dmrconfig `DATASZ = 16` for writes + qdmr `size = 16`; verified: pending.)
-- A write is acknowledged with a bare `0x06`. Anything else aborts the session; write
-  frames are never retried (a half-applied retry is worse than a clean failure —
-  same rule as the DM-32UV, protocol §8).
+  (verified: hw — recomputed over every frame of the CPS write capture; all match.)
+- **Write length is 16 bytes.** Both references say so and the official CPS uses 16 for
+  every one of its 6,022 write frames. Plugmatic writes no other length.
+  (source: dmrconfig `DATASZ = 16`, qdmr `size = 16`; verified: hw + CPS capture.)
+- A write is acknowledged with a bare `0x06`. **The ACK means "staged", not "applied"** —
+  see §5.1. Anything else aborts the session; write frames are never retried (a
+  half-applied retry is worse than a clean failure — same rule as the DM-32UV,
+  protocol §8).
 
-### 5.1 BLOCKED — this radio ACKs writes and does not apply them (hw, 2026-08-10)
+### 5.1 Writes are staged and commit on `END` (hw-verified, 2026-08-20)
 
-**Status: write support is not possible from the currently documented protocol.**
-On this unit (D878UV2, firmware **V101**) a correctly framed 16-byte write is
-acknowledged with `0x06` and then **has no effect on memory**.
+This radio does **not** apply a write when it acknowledges it. Writes accumulate in a
+staging area that is invisible to reads, and the session teardown decides their fate.
+Four rules, each established by direct experiment on this unit (D878UV2, fw **V101**):
 
-Evidence, in the order it was gathered:
-
-| Test | Target | Result |
+| # | Rule | Evidence |
 |---|---|---|
-| Write identical bytes back | unallocated channel slot 0x00FC07C0 | ACK, memory unchanged — *looks* like a pass |
-| Write `5A`×16 | same address | **ACK, memory still `FF`** |
-| Write `5A`×16, close session, reopen, re-read | unallocated slot 0x00841200 | **still `FF`** — not a commit-on-close effect |
-| Flip one padding byte | **allocated** channel record 0x00800020 | **ACK, unchanged** — not an allocation effect |
+| W1 | `END` commits every write staged in the session | write, `END`, reopen, re-read → new byte present |
+| W2 | Dropping the port without `END` discards everything staged | write, close port, reopen, re-read → original byte |
+| W3 | **Any read after a write discards everything staged** | write, read, `END`, reopen → original byte. True whether the read targets the written address or an unrelated one |
+| W4 | Reads *before* the first write are harmless | read, write, `END`, reopen → new byte present |
 
-Ruled out: address alignment (all targets 16-byte aligned), unbacked flash (an
-allocated record behaves the same), deferred commit (survives session close and
-reopen), stream desync (subsequent reads validate address echo and checksum
-normally, so the radio consumed exactly our frame and replied one byte), and a wrong
-checksum (the same routine validates every read response the radio sends).
+Writes staged across several regions in one session commit together (verified with two
+writes 256 KB apart — both landed).
 
-Both references write exactly this frame and nothing else — `qdmr`
-`AnytoneInterface::write` and dmrconfig `serial_write_region` were re-read
-specifically to look for a missing prepare/commit/unlock step, and there is none.
-So either this firmware requires a step neither project implements, or their AnyTone
-write paths are stale for the D878UVII+.
+These four rules are necessary but **not sufficient** to write safely — §5.4 is the
+other half, and it is the dangerous one.
 
-**What would unblock it:** a USB capture of the official AnyTone CPS writing a
-codeplug to this radio (§3.3 passive capture). Diffing that byte stream against §5
-will show the missing step immediately. Step-by-step instructions for producing the
-capture: **`docs/d878uv-cps-write-capture.md`**. Until then `D878uvRadio.SupportsWrite` stays **false** and
-`plugmatic write --radio d878uv` refuses.
+Consequences, and they are not optional:
 
-**Why the ladder caught this:** an identical-bytes writeback — the conventional
-"no-op write" first step — passes here for the wrong reason, because writing `FF`
-over `FF` is indistinguishable from doing nothing. Only mutating a byte and reading
-it back distinguishes "accepted and applied" from "politely ignored". **A no-op
-writeback is not sufficient evidence that a write path works.** Apply this to every
-future radio.
+- **A session is two-phase: all reads, then all writes, then `END`.** Once a write has
+  been sent, a read is a data-loss bug, not a diagnostic. `D878uvProtocol` enforces this
+  by throwing on a read after a write rather than letting the radio silently discard.
+- **Verification must happen in a new session.** Reading back in the writing session
+  both returns stale bytes *and* destroys the write it was trying to check.
+- **`END` is a commit, not best-effort teardown.** After writes it must be sent and its
+  `0x06` confirmed; a swallowed failure there silently discards the whole codeplug.
+
+This matches the official CPS exactly: its write session is `PROGRAM`, identify, one
+read of `0x02FA0020`, 6,022 back-to-back `W` frames, `END` — and **not one read after
+the first write**. (source: CPS USB capture, `Program → Write to radio`, Wireshark
+4.6.8/USBPcap; verified: hw.)
+
+### 5.2 Why this looked like "the radio ignores writes" (superseded)
+
+An earlier round of testing concluded write support was impossible here. It was wrong,
+and the way it was wrong is worth keeping:
+
+- Its probe did *read, write, read-back, compare* in one session. The read-back both
+  returned the pre-write bytes (W3 makes reads show committed memory only) **and**
+  discarded the write it was checking. Every escalation of that probe failed for the
+  same reason, which read as consistent confirmation.
+- Its cross-session check — the one test that could have caught this — used
+  `0x00841200` and `0x00FC07C0`, addresses the CPS never writes and which are not
+  backed by storage. They read `FF` before and after, so the one correct experiment
+  landed on the one class of address that cannot answer the question.
+
+**The lesson to carry:** when a write is acknowledged and appears not to land, prove
+the *target address is writable at all* before concluding the write path is broken —
+pick an address the vendor tool itself writes. Also note the corrected form of the
+earlier lesson: a mutation test is still mandatory, but on this radio it must read back
+in a **separate session**, or it reports a false negative just as loudly as a no-op
+writeback reports a false positive.
+
+### 5.3 What the CPS writes
+
+The CPS writes **96,352 bytes** in 6,022 frames (≈3.4 s), not the whole 1.63 MB image:
+only the records the bitmaps mark as allocated, plus the bitmaps and settings. Its gaps
+are deliberate — see §5.4 for why writing nothing to an address is how the CPS says
+"this slot is empty".
+
+### 5.4 A write erases 256 KB around it (hw-verified, 2026-08-20)
+
+**This is the fact that governs everything about writing to this radio.**
+
+A 16-byte write does not modify 16 bytes. It erases the entire aligned **0x40000
+(256 KB) block** containing the address and reprograms only the bytes staged in that
+same session. Every other byte in the block comes back `0xFF`.
+
+| Evidence | Result |
+|---|---|
+| 64 marks laid 0x1000 apart across `0x00880000-0x008BF000`, committed | all 64 present |
+| one 16-byte write at `0x00888000`, committed | **62 marks erased, 0 survived** — the whole 0x40000 block |
+| a 16-byte probe at `0x00800030` | erased `0x00800000-0x0083FFFF`, including 5,224 bytes of live channel data |
+| a 16-byte probe at `0x00840000` | erased `0x00840000-0x0087FFFF`; `0x00800030` survived it |
+
+The last row bounds the block from both sides: `0x00800030` and `0x00840000` are 0x3FFD0
+apart and land in *different* blocks, so the block is exactly 0x40000, aligned — which is
+also the channel-bank stride `BetweenChannelBanks`.
+
+This reframes §5.1 entirely. Staging is not an optimisation; it is how the radio
+assembles a complete block before erasing and reprogramming it. It also explains the
+CPS's write pattern: every contiguous run it sends is a block being rewritten in full,
+and the gaps inside those runs are slots it intends to leave erased.
+
+**Consequence: a write may only be issued for a block whose every byte is known.**
+Writing "just the chunk that changed" destroys the rest of the block. Plugmatic's write
+plan therefore works in whole erase blocks and **refuses** any block the region table
+does not completely describe, naming the block and how much of it is uncovered.
+
+**Firmware flash signatures.** The last 16 bytes of every 0x20000 half-block hold
+`FF FF FF FF 22 33 44 55 FF FF FF FF 55 55 AA AA`. This is firmware-managed, not
+codeplug data: it is present in blocks Plugmatic has never written, and it is back in
+place after an erase. Anything asking "is this block empty?" must ignore it
+(`Layout.IsFlashMarker`).
+
+### 5.5 Why write support is still off
+
+The protocol is solved. The **region table** is what blocks writes: it describes
+1.63 MB scattered across erase blocks that hold considerably more, so writing any block
+would wipe codeplug bytes Plugmatic has never read and cannot put back. Concretely, the
+block at `0x00800000` is covered for 0x2000 of 0x40000 bytes, yet the CPS keeps real
+channel data at `0x00802000-0x00802D00` and `0x00803900-0x00804000` — outside every
+region we model.
+
+`D878uvRadio.SupportsWrite` is therefore **false**, and `BuildWritePlan` refuses rather
+than silently wiping. Two ways forward, in preference order:
+
+1. **Read whole erase blocks.** In the read phase, read each block that needs to change
+   in full (raw, not through the region table), splice the modelled changes into it, and
+   write the block back complete. This preserves unmodelled bytes byte-for-byte without
+   having to understand them, and needs no format work.
+2. **Extend the region table** to cover whole erase blocks. Larger change: it moves the
+   packed image layout and invalidates existing `.bin` backups.
+
+Until one of those lands, the write path exists, is guarded, and refuses.
+
+### 5.6 What this cost, and the rule that comes out of it
+
+Establishing §5.4 destroyed live data on the test radio: two 16-byte probes at
+`0x00800030` and `0x00840000` erased channel banks 0 and 1, losing 5,224 bytes of
+channel records — the whole of "Channel 1" among them. It was fully recovered, because
+the CPS write capture is a byte-exact record of what those blocks should contain, and
+replaying the 672 capture frames for those two blocks restored all 32,768 bytes with
+zero mismatches.
+
+The probe that did the damage had *passed*. It read its 16 bytes back, saw the mutation,
+restored the original, and reported success — because it only ever looked at the 16
+bytes it wrote. The blast radius was 16,384× the size of the thing being verified.
+
+**The rule: before writing to a radio for the first time, establish the erase
+granularity, and check for damage over that whole granularity — not over the bytes you
+wrote.** A mutation test that only re-reads its own target cannot see the crater around
+it. `plugmatic dev writetest` now refuses to probe any block that holds data, and works
+only in flash it has confirmed is empty.
 
 ## 6. Safety rules (D14 / I8)
 
@@ -169,7 +276,18 @@ future radio.
 | 2026-08-10 | Identify layout + model string | **verified**: `49 44 38 37 38 55 56 32 0E 56 31 30 31 00 00 06` → model `D878UV2`, band code 0x0E, version `V101` |
 | 2026-08-10 | Read framing, big-endian address, checksum, 64-byte chunks | **verified** — 1.66 MB read with zero checksum failures |
 | 2026-08-10 | `END` teardown | **verified** |
-| — | Write framing | not attempted (no writes before the format doc is complete) |
+| 2026-08-20 | CPS read capture replays our exact read framing | **verified** — control sample, confirms the capture pipeline |
+| 2026-08-20 | Write framing (`57` + BE address + `10` + data + sum + `06` → `06`) | **verified** — byte-identical to the CPS's 6,022 write frames |
+| 2026-08-20 | W1 `END` commits staged writes | **verified** |
+| 2026-08-20 | W2 close without `END` discards | **verified** |
+| 2026-08-20 | W3 a read after a write discards (any address) | **verified** |
+| 2026-08-20 | W4 reads before the first write are harmless | **verified** |
+| 2026-08-20 | Writes staged across regions commit together | **verified** (two targets 256 KB apart) |
+| 2026-08-20 | Line coding / DTR / RTS do not gate writes | **verified** — ruled out |
+| 2026-08-20 | Erase block is 0x40000, aligned | **verified** — 64-mark sweep; one write erased all of `0x00880000-0x008BFFFF` |
+| 2026-08-20 | A write erases the block and keeps only what the session staged | **verified** — cost 5,224 bytes of live channel data, since restored |
+| 2026-08-20 | Firmware flash signature at the end of every 0x20000 half-block | **verified** — present in never-written blocks, restored after erase |
+| 2026-08-20 | Damaged blocks restored from the CPS capture | **verified** — 32,768 bytes, zero mismatches |
 
 **USB re-enumeration (hw-verified).** This radio drops and re-creates its USB device
 when a session ends, so `/dev/ttyACM*` is recreated after *every* command and any

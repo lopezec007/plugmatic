@@ -152,102 +152,120 @@ public static class DevCommands
     // ---------------------------------------------------------------- writetest
 
     /// <summary>
-    /// Smallest possible write-class validation: read one 16-byte chunk, write the very
-    /// same bytes back, read again and compare. Proves framing, checksum and ACK with no
-    /// semantic change even if every byte lands. Targets an unallocated record by default,
-    /// so the radio does not use the content either way.
+    /// Ladder step 4: the mutation test, done the only way this radio can answer it safely.
+    ///
+    /// Two hardware facts shape this. Writes are staged and commit on `END`, and any read
+    /// after a write discards them — so the probe and its read-back must live in different
+    /// sessions. And a 16-byte write erases the whole 256 KB block around it, reprogramming
+    /// only what was staged — so probing an address near live data destroys that data. This
+    /// command therefore works only inside an erase block it has confirmed is entirely
+    /// erased, where there is nothing to lose. [d878uv-protocol.md §5.1/§5.4]
     /// </summary>
     private static Command BuildWriteTest()
     {
         var port = PortOption();
         var addrOpt = new Option<string?>("--address")
-        { Description = "Target address; defaults to the last (unallocated) channel slot" };
-        var probeByteOpt = new Option<int>("--probe-offset")
-        { DefaultValueFactory = _ => -1, Description = "Mutate only this byte of the chunk (default: whole chunk)" };
-        var keepOpt = new Option<bool>("--keep")
-        { Description = "Leave the probe pattern in place (target is unallocated filler) to test commit-on-close" };
-        var proveOpt = new Option<bool>("--prove")
-        { Description = "Also write a probe pattern, confirm it landed, then restore the original" };
-        var cmd = new Command("writetest", "Ladder step 4a: write one chunk back byte-identical and verify");
-        cmd.Options.Add(port); cmd.Options.Add(addrOpt); cmd.Options.Add(proveOpt); cmd.Options.Add(keepOpt); cmd.Options.Add(probeByteOpt);
+        { Description = "Probe address; must sit in an all-FF erase block (default 0x00880000)" };
+        var yesOpt = new Option<bool>("--yes", "-y") { Description = "Skip the confirmation prompt" };
+        var cmd = new Command("writetest",
+            "Ladder step 4: prove a write lands, in scratch flash, verified in a separate session");
+        cmd.Options.Add(port); cmd.Options.Add(addrOpt); cmd.Options.Add(yesOpt);
         cmd.SetAction(async (pr, ct) =>
         {
             var radio = Common.Resolve("d878uv");
             uint address = pr.GetValue(addrOpt) is { } t
                 ? Convert.ToUInt32(t.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? t[2..] : t, 16)
-                : Plugmatic.Radios.D878uv.Format.Layout.ChannelSlot(
-                      Plugmatic.Radios.D878uv.Format.Layout.MaxChannels - 1).Address;
+                : Plugmatic.Radios.D878uv.Format.Layout.ChannelBanks
+                  + 2 * Plugmatic.Radios.D878uv.Format.Layout.BetweenChannelBanks;
+            if (address % 16 != 0) throw new CliError("--address must be 16-byte aligned.", 1);
+            uint block = Plugmatic.Radios.D878uv.Format.Layout.EraseBlockOf(address);
 
             var runs = new RunManager();
             var run = runs.CreateRun(radio.Model, "dev");
+            Console.WriteLine($"Run: {run.Directory}");
             var outcome = RunOutcome.Failed;
+            // Every open waits: this command is inherently multi-session, and the radio drops
+            // its USB device after each one — including the one before this command started.
+            var timeout = TimeSpan.FromSeconds(60);
+
+            async Task<T> InSessionAsync<T>(Func<Plugmatic.Radios.D878uv.Protocol.D878uvProtocol, RadioSession, Task<T>> body)
+            {
+                var session = await RadioSession.ReopenAsync(radio, pr.GetValue(port), run, timeout, ct);
+                try
+                {
+                    await session.IdentifyAsync(ct);
+                    var proto = (Plugmatic.Radios.D878uv.Protocol.D878uvProtocol)session.Protocol;
+                    var result = await body(proto, session);
+                    await proto.EndSessionAsync(session.Link, ct);      // the commit point
+                    return result;
+                }
+                finally { await session.DisposeAsync(); }
+            }
+
+            Task<byte[]> ReadAsync(uint at, int len) =>
+                InSessionAsync((proto, s) => proto.ReadRegionAsync(s.Link, at, len, null, "read", ct));
+
+            Task<bool> WriteAsync(byte[] data) => InSessionAsync(async (proto, s) =>
+            {
+                await proto.WriteChunkAsync(s.Link, address, data, ct);
+                return true;
+            });
+
             try
             {
-                await using var session = await RadioSession.OpenAsync(radio, pr.GetValue(port), run, ct);
-                await session.IdentifyAsync(ct);
-                var proto = (Plugmatic.Radios.D878uv.Protocol.D878uvProtocol)session.Protocol;
-
-                var before = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
-                run.WriteArtifact("before.bin", before);
-                Console.WriteLine($"Address 0x{address:X8} currently reads: {Convert.ToHexString(before)}");
-                Console.WriteLine("This writes those exact bytes back — no value changes, whatever happens.");
-                Console.Write("Type WRITE to send one 16-byte frame: ");
-                if (Console.ReadLine()?.Trim() != "WRITE")
+                Console.WriteLine($"Probe 0x{address:X8} sits in erase block 0x{block:X8}" +
+                                  $"-0x{block + Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize - 1:X8}.");
+                Console.WriteLine("Checking the whole block is erased (a write wipes all of it)...");
+                var blockBytes = await ReadAsync(block,
+                    (int)Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize);
+                int used = blockBytes.Where((b, i) =>
+                    b != 0xFF &&
+                    !Plugmatic.Radios.D878uv.Format.Layout.IsFlashMarker(block + (uint)i)).Count();
+                if (used > 0)
                 {
-                    outcome = RunOutcome.Aborted;
-                    Console.WriteLine("Aborted; nothing sent.");
-                    return 1;
+                    throw new CliError(
+                        $"Block 0x{block:X8} holds {used} non-FF byte(s), so it is in use. A 16-byte " +
+                        "write erases the entire block and reprograms only what this command stages, " +
+                        "which would destroy that data. Point --address at an unused block (the " +
+                        "default, 0x00880000, is channel bank 2). [d878uv-protocol.md §5.4]", 1);
                 }
+                Console.WriteLine("Block holds no codeplug data — nothing here to lose.");
 
-                await proto.WriteChunkAsync(session.Link, address, before, ct);
-                var after = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
-                run.WriteArtifact("after.bin", after);
-
-                bool same = before.AsSpan().SequenceEqual(after);
-                Console.WriteLine($"After write:  {Convert.ToHexString(after)}");
-                if (!same)
+                var probe = Enumerable.Range(0, 16).Select(i => (byte)(0x5A ^ i)).ToArray();
+                if (!pr.GetValue(yesOpt))
                 {
-                    Console.WriteLine("FAIL — memory changed; the write framing is wrong. Do not proceed.");
-                    return 3;
-                }
-                Console.WriteLine("Identical write accepted.");
-
-                // An identical write proves nothing if the radio simply ignored us: mutate,
-                // confirm the change landed, then restore. Same unallocated slot throughout.
-                bool proved = false, restored = false;
-                if (pr.GetValue(proveOpt))
-                {
-                    var probe = (byte[])before.Clone();
-                    int only = pr.GetValue(probeByteOpt);
-                    if (only >= 0 && only < 16) probe[only] ^= 0x5A;   // single-byte mutation
-                    else Array.Fill(probe, (byte)0x5A);
-                    await proto.WriteChunkAsync(session.Link, address, probe, ct);
-                    var mutated = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
-                    proved = mutated.AsSpan().SequenceEqual(probe);
-                    Console.WriteLine($"Probe write:  {Convert.ToHexString(mutated)} — " +
-                                      (proved ? "writes take effect" : "radio IGNORED the write"));
-
-                    if (pr.GetValue(keepOpt))
+                    Console.Write($"Type WRITE to stage 16 bytes at 0x{address:X8}: ");
+                    if (Console.ReadLine()?.Trim() != "WRITE")
                     {
-                        restored = true;   // deliberately left in place for the next session's read
-                        Console.WriteLine("Probe left in place (--keep) to test whether writes commit on close.");
-                    }
-                    else
-                    {
-                        await proto.WriteChunkAsync(session.Link, address, before, ct);
-                        var final = await proto.ReadRegionAsync(session.Link, address, 16, null, "read", ct);
-                        restored = final.AsSpan().SequenceEqual(before);
-                        Console.WriteLine($"Restored:     {Convert.ToHexString(final)} — " +
-                                          (restored ? "original bytes back" : "RESTORE FAILED"));
+                        outcome = RunOutcome.Aborted;
+                        Console.WriteLine("Aborted; nothing sent.");
+                        return 1;
                     }
                 }
 
-                bool ok = same && (!pr.GetValue(proveOpt) || (proved && restored));
-                Console.WriteLine(ok ? "PASS — write path validated." : "FAIL — see above.");
+                await WriteAsync(probe);
+                var after = await ReadAsync(address, 16);      // new session: the only honest read-back
+                bool landed = after.AsSpan().SequenceEqual(probe);
+                Console.WriteLine($"After write:  {Convert.ToHexString(after)} — " +
+                                  (landed ? "the write took effect" : "the radio IGNORED the write"));
+
+                // Put the block back the way it was: writing FF erases the block and programs
+                // FF, so the whole 256 KB returns to erased.
+                await WriteAsync(Enumerable.Repeat((byte)0xFF, 16).ToArray());
+                var cleaned = await ReadAsync(block,
+                    (int)Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize);
+                bool clean = !cleaned.Where((b, i) =>
+                    b != 0xFF &&
+                    !Plugmatic.Radios.D878uv.Format.Layout.IsFlashMarker(block + (uint)i)).Any();
+                Console.WriteLine($"Cleanup:      block back to erased: {clean}");
+
+                bool ok = landed && clean;
+                Console.WriteLine(ok ? "PASS — write path validated, scratch block left erased."
+                                     : "FAIL — see above.");
                 run.Extra["writeTest"] = new System.Text.Json.Nodes.JsonObject
                 {
-                    ["address"] = $"0x{address:X8}", ["identicalWriteOk"] = same,
-                    ["mutationLanded"] = proved, ["restored"] = restored,
+                    ["address"] = $"0x{address:X8}", ["eraseBlock"] = $"0x{block:X8}",
+                    ["mutationLanded"] = landed, ["blockLeftErased"] = clean,
                 };
                 outcome = ok ? RunOutcome.Success : RunOutcome.Failed;
                 return ok ? 0 : 3;

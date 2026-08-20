@@ -19,6 +19,15 @@ public sealed class D878uvRadio : IRadioDefinition
     /// <summary>The radio's own USB stack: GD32 (this unit) and the older STM VCP.</summary>
     public IReadOnlyList<string> KnownUsbIds { get; } = ["28e9:018a", "0483:5740"];
 
-    /// <summary>Read/backup only until docs/formats/d878uv-format.md is hardware-verified.</summary>
+    /// <summary>
+    /// The write *protocol* is hardware-verified (staged writes, commit on `END`), but the
+    /// codeplug write path is not safe yet: a write erases the whole 256 KB block around it,
+    /// and the region table describes only part of each block, so writing would destroy
+    /// codeplug bytes we have never read. Blocked on extending the region table to whole
+    /// erase blocks. [d878uv-protocol.md §5.4]
+    /// </summary>
     public bool SupportsWrite => false;
+
+    /// <summary>A read discards every write staged in the same session. [protocol §5.1 W3]</summary>
+    public bool SeparateReadWriteSessions => true;
 }

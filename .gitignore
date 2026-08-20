@@ -5,3 +5,8 @@ obj/
 .idea/
 artifacts/
 TestResults/
+
+# USB captures contain the operator's callsign, DMR ID and full codeplug — keep them local.
+*.pcapng
+*.pcapng.gz
+__pycache__/

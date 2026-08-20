@@ -243,7 +243,8 @@ public sealed class Dm32uvProtocol : IRadioProtocol
         return img.Bytes;
     }
 
-    public async Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image, IProgress<TransferProgress>? progress, CancellationToken ct)
+    public async Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image, ReadOnlyMemory<byte>? baseline,
+        IProgress<TransferProgress>? progress, CancellationToken ct)
     {
         var img = new Dm32Image(image.ToArray());
         var map = await GetAddressMapAsync(link, ct);

@@ -1,5 +1,12 @@
 # Capturing an AnyTone CPS write (to unblock D878UVII+ write support)
 
+> **RESOLVED — 2026-08-20.** The captures were produced and answered the question. The
+> CPS uses byte-identical framing to ours; what we were missing is that writes are
+> *staged* and commit on `END`, and that any read after a write discards them. See
+> `docs/formats/d878uv-protocol.md` §5.1-§5.6 for the findings and
+> `docs/captures/README.md` for the archived captures. This document is kept for the
+> capture procedure, which is worth reusing for the next radio.
+
 **Why:** plugmatic can read, back up and decode your AnyTone completely, and its encoder
 reproduces the radio's own image byte-for-byte. But the radio **acknowledges our write
 frames and silently does not apply them** — proven on both allocated and unallocated
