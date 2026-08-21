@@ -37,11 +37,11 @@ public sealed class FakeAnytoneRadio : ISerialLink
     /// </summary>
     private void Commit()
     {
-        foreach (var block in _staged.Keys.Select(Layout.EraseBlockOf).Distinct().OrderBy(b => b))
+        foreach (var block in _staged.Keys.Select(Layout.BankOf).Distinct().OrderBy(b => b))
         {
             ErasedBlocks.Add(block);
             foreach (var addr in Memory.Keys
-                         .Where(a => a >= block && a < block + Layout.EraseBlockSize).ToList())
+                         .Where(a => a >= block && a < block + Layout.BankStride).ToList())
                 Memory.Remove(addr);                       // erased to 0xFF
         }
         foreach (var (addr, value) in _staged) Memory[addr] = value;
@@ -265,11 +265,10 @@ public class D878ProtocolTests
     }
 
     [Fact]
-    public void Writing_stays_disabled_until_the_writable_address_set_is_known()
+    public void Writing_is_enabled_and_needs_a_session_of_its_own()
     {
-        // The protocol is solved; the addressing is not. See d878uv-protocol.md §5.7.
         var radio = Plugmatic.Radios.D878uv.D878uvRadio.Instance;
-        Assert.False(radio.SupportsWrite);
+        Assert.True(radio.SupportsWrite);
         Assert.True(radio.SeparateReadWriteSessions);
     }
 }

@@ -20,13 +20,16 @@ public sealed class D878uvRadio : IRadioDefinition
     public IReadOnlyList<string> KnownUsbIds { get; } = ["28e9:018a", "0483:5740"];
 
     /// <summary>
-    /// Read/backup only. The serial write protocol is solved, but the *addressing* is not:
-    /// a write erases the whole 0x40000 window around it, and rewriting that window sends
-    /// addresses the vendor CPS never writes — which on 2026-08-21 copied channel bank 0
-    /// over channel bank 1 on this unit. [d878uv-protocol.md §5.7]
+    /// Hardware-verified 2026-08-21. Writes are staged and commit on `END`; a write erases the
+    /// whole bank, so each changed bank is read back, spliced and rewritten complete — inside
+    /// the bank's storage half only, never the mirror, never the firmware signature.
+    /// [d878uv-protocol.md §5.1/§5.7]
     /// </summary>
-    public bool SupportsWrite => false;
+    public bool SupportsWrite => true;
 
     /// <summary>A read discards every write staged in the same session. [protocol §5.1 W3]</summary>
     public bool SeparateReadWriteSessions => true;
+
+    /// <summary>The radio owns its USB stack and re-enumerates after every session. [protocol §2]</summary>
+    public bool ReEnumeratesAfterSession => true;
 }

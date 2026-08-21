@@ -202,10 +202,10 @@ The last row bounds the block from both sides: `0x00800030` and `0x00840000` are
 apart and land in *different* blocks, so the affected span is 0x40000, aligned — which is
 also the channel-bank stride `BetweenChannelBanks`.
 
-**Caveat added 2026-08-21.** "0x40000 goes FF" is what was *observed*; it is not
-necessarily one 0x40000 erase page. Some 0x20000 spans read back duplicated (§5.5), so a
-128 KB erase would look like 256 KB through that duplication. Treat 0x40000 as the blast
-radius to check for damage, not as a proven page size.
+**Superseded 2026-08-21 — see §5.6.** "0x40000 goes FF" is what was *observed*, and the
+observation stands, but the interpretation was wrong: a bank's storage is `0x20000` and the
+upper half duplicates it, so a 128 KB erase looks like 256 KB. Treat `0x40000` as the blast
+radius to check for damage; the writable unit is the `0x20000` storage half.
 
 This reframes §5.1 entirely. Staging is not an optimisation; it is how the radio
 assembles a complete block before erasing and reprogramming it. It also explains the
@@ -257,27 +257,80 @@ The write went wrong precisely where it left the vendor's footprint: everything 
 writes for bank 0 lives below `0x00804000`, and the frames that had no counterpart in the
 capture were the ones above `0x00820000` — the duplicated half.
 
-### 5.6 Why write support is off — and what would turn it on
+### 5.6 The bank storage model (hw-verified, 2026-08-21)
 
-`D878uvRadio.SupportsWrite` is **false** and `WriteImageAsync` refuses. The protocol is
-solved; the **addressing** is not. Rewriting an erase window is only safe if every address
-in it is real, independent storage, and §5.5 shows that is not true and not yet predictable.
+This is the model the write path is built on, and it supersedes the "0x40000 erase block"
+reading in §5.4.
 
-The way forward is to stop deriving write addresses from the region table and derive them
-from the vendor instead:
+| | |
+|---|---|
+| **Bank stride** | `0x40000` — the spacing between banks, and the span a write disturbs |
+| **Bank storage** | `0x20000` — the real, writable storage, at `[bank, bank + 0x20000)` |
+| **Upper half** | `[bank + 0x20000, bank + 0x40000)` is a **duplicate** of the lower half, not storage to write |
+| **Flash signature** | last 16 bytes of the storage half; firmware-managed, never written |
 
-1. **Model the writable address set from the CPS capture** — the allocated records, the
-   bitmaps and the settings blocks it writes, and nothing else. The capture is 96,352 bytes
-   across known ranges, and a radio programmed that way demonstrably works.
-2. **Never write an address the CPS does not.** Every failure so far, including the two
-   erased channel banks in §5.7 and the bank copy above, came from writing outside that set.
-3. Only then re-run the ladder, checking damage over the whole erase window with
-   `plugmatic dev rawdump`, and — the part that caught this one — over *neighbouring* banks
-   too, not just the window that was written.
+Evidence:
 
-Until that exists, `plugmatic read` and backup are unaffected and complete.
+- A bank's 0x40000 window repeats with period exactly `0x20000` and no smaller period —
+  checked offline against full dumps of banks 0 and 1.
+- The vendor CPS writes **0 of its 96,352 bytes** at `bank + 0x20000` or above, in any of
+  the 21 banks it touches. No region in the table extends past the half either.
+- Writing the upper half is what copied bank 0 over bank 1 (§5.5).
+- The duplicate is *not* a read alias: after a write that filled only the lower half, the
+  upper half read back erased while the lower half kept its data (§5.8).
 
-### 5.7 What this has cost, and the rules that come out of it
+Not every bank carries a duplicate — a read-only survey of all 66 codeplug banks found 6
+duplicating, 7 with independent content in both halves, and 53 empty. That variation is
+not understood and does not need to be: the write path never addresses the upper half, so
+it cannot depend on the answer.
+
+### 5.7 What Plugmatic writes (hw-verified, 2026-08-21)
+
+For each bank holding a byte that changes:
+
+1. **Read its storage half in full** (`0x20000`), before any write goes out — §5.1 W4.
+2. **Splice** the modelled bytes over it. Inter-region gaps and unmodelled records keep the
+   value just read, so they survive verbatim.
+3. **Rewrite the unit**, skipping chunks that are entirely `0xFF` (the erase leaves those,
+   and not writing an address is how the CPS marks a slot empty) and skipping the firmware
+   flash signature.
+4. `END` commits.
+
+Nothing above `bank + 0x20000` is ever addressed, and `Layout.IsWritable` enforces all of
+it — storage half, codeplug banks only, never a signature.
+
+**Hardware result** (one-byte channel rename, `'1'` → `'Z'` at `0x0080002B`):
+
+| Check | Result |
+|---|---|
+| Frames sent for bank 0 | 640 — **the same count the CPS sends for that bank**, every one inside its footprint |
+| Intended change | applied |
+| Post-write full-image verification | matches |
+| Bank 0 window, before vs after | only the intended byte, plus §5.8 |
+| **Neighbour bank 1, before vs after** | **0 bytes differ** — the §5.5 failure is gone |
+| Restore to the original image | full read byte-identical to the pre-write image |
+
+### 5.8 The upper-half duplicate, and what we cannot put back
+
+After a Plugmatic write, the written bank's upper half reads **erased** where it used to
+duplicate the lower half — bank 0 went from 20,264 non-`FF` bytes to 10,132, exactly half.
+It has not regenerated on its own across repeated reads.
+
+What that means, stated honestly:
+
+- The duplicate is firmware-made. The CPS never writes those addresses, so it did not put
+  it there; the radio did, at some point we have not identified.
+- **We cannot recreate it.** Writing that half is precisely what corrupted a neighbouring
+  bank in §5.5, so it is not something to attempt.
+- Everything the radio's codeplug is read from — every region, and every address the CPS
+  writes — lives in the storage half and is verified correct.
+
+So the risk is bounded but not zero: if the firmware treats the duplicate as a recovery
+copy, a radio written by Plugmatic has one fewer safety net than one written by the CPS
+until the firmware rebuilds it. Whether it rebuilds it (on power-cycle, on its own write
+path, or never) is **not yet known** and is the open question in this area.
+
+### 5.9 What this has cost, and the rules that come out of it
 
 Establishing §5.4 destroyed live data on the test radio: two 16-byte probes at
 `0x00800030` and `0x00840000` erased channel banks 0 and 1, losing 5,224 bytes of
@@ -304,7 +357,10 @@ check is a full read compared against the intended image, which is what caught i
 **Rule 3: on a radio whose vendor tool has been captured, treat the captured address set as
 the writable address set.** Every byte lost on this radio was at an address the CPS never
 writes. Staying inside the vendor's footprint is not a heuristic here; it is the only
-evidence-backed definition of "safe to write" this project has.
+evidence-backed definition of "safe to write" this project has. Applied as a pre-flight
+check it is cheap and decisive: the corrected write path's plan for bank 0 came to 640
+frames, the same count the CPS sends, every one inside its footprint — computed and checked
+*before* going near the radio.
 
 ## 6. Safety rules (D14 / I8)
 
@@ -340,6 +396,11 @@ evidence-backed definition of "safe to write" this project has.
 | 2026-08-21 | …and corrupts the *next* bank: writing only 0x00800000-0x0083FFF0 put bank 0's records into bank 1 | **verified** — from the transfer log; write support withdrawn |
 | 2026-08-21 | Some 0x20000 spans read back duplicated (channel banks, settings, zoneNames, zoneChannels), others do not (contacts, 0x024C0000) | **verified** — pre-dates any write |
 | 2026-08-21 | Both banks restored by replaying the CPS frames for them | **verified** — full image byte-identical to the pre-write read; window rawdump 0 bytes differ |
+| 2026-08-21 | A bank's 0x40000 window repeats with period exactly 0x20000, no smaller | **verified** — offline, full dumps of banks 0 and 1 |
+| 2026-08-21 | The CPS writes 0 of 96,352 bytes at `bank + 0x20000` or above, across 21 banks | **verified** — from the capture |
+| 2026-08-21 | Storage-half write path: intended byte applied, neighbour bank 0 bytes differ, full-image verification matches | **verified** — 640 frames, same count the CPS sends for that bank |
+| 2026-08-21 | Restore to the original image after a write | **verified** — full read byte-identical |
+| 2026-08-21 | The upper-half duplicate does not regenerate after a Plugmatic write | **verified** — open question §5.8 |
 
 **USB re-enumeration (hw-verified).** This radio drops and re-creates its USB device
 when a session ends, so `/dev/ttyACM*` is recreated after *every* command and any

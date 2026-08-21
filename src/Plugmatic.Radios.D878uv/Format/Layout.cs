@@ -55,16 +55,23 @@ public static class Layout
     public const uint SettingsExtension = 0x02501400;
 
     /// <summary>
-    /// Flash erase granularity. A write anywhere inside an aligned 0x40000 block erases the
-    /// **entire block** and reprograms only the bytes staged in that same session; every
-    /// other byte in the block comes back 0xFF. Measured on hardware: one 16-byte write at
-    /// 0x00888000 erased all 62 marks laid across 0x00880000-0x008BF000.
-    /// [d878uv-protocol.md §5.4]
+    /// Logical spacing between banks. A write anywhere in a bank affects everything visible
+    /// in this whole window, so it is the span to check for damage. [d878uv-protocol.md §5.4]
     /// </summary>
-    public const uint EraseBlockSize = 0x00040000;
+    public const uint BankStride = 0x00040000;
 
-    /// <summary>Start address of the erase block containing `address`.</summary>
-    public static uint EraseBlockOf(uint address) => address & ~(EraseBlockSize - 1);
+    /// <summary>
+    /// Real storage per bank. The upper half of a bank is the same 0x20000 read a second
+    /// time — verified: a bank's two halves are byte-identical, and the vendor CPS never
+    /// writes a single byte at `bank + 0x20000` or above (0 of 96,352). Writing the mirror
+    /// is what put channel bank 0's records into bank 1 on 2026-08-21, so the writable
+    /// window is `[bank, bank + BankStorageSize)` and nothing else.
+    /// [d878uv-protocol.md §5.5/§5.6]
+    /// </summary>
+    public const uint BankStorageSize = 0x00020000;
+
+    /// <summary>Base address of the bank containing `address`.</summary>
+    public static uint BankOf(uint address) => address & ~(BankStride - 1);
 
     /// <summary>
     /// The radio keeps a 16-byte flash signature at the end of every 0x20000 half-block
@@ -166,34 +173,41 @@ public static class Layout
         throw new D878FormatException($"Offset 0x{offset:X} is outside the packed image.");
     }
 
-    /// <summary>
-    /// The erase blocks the codeplug occupies — every 0x40000 block that any region falls
-    /// in, whole or in part.
-    /// </summary>
-    public static readonly IReadOnlySet<uint> CodeplugEraseBlocks = BuildEraseBlocks();
+    /// <summary>The banks the codeplug occupies — every 0x40000 window any region falls in.</summary>
+    public static readonly IReadOnlySet<uint> CodeplugBanks = BuildBanks();
 
-    private static HashSet<uint> BuildEraseBlocks()
+    private static HashSet<uint> BuildBanks()
     {
-        var blocks = new HashSet<uint>();
+        var banks = new HashSet<uint>();
         foreach (var region in Regions)
-            for (uint b = EraseBlockOf(region.Address); b < region.End; b += EraseBlockSize)
-                blocks.Add(b);
-        return blocks;
+            for (uint b = BankOf(region.Address); b < region.End; b += BankStride)
+                banks.Add(b);
+        return banks;
     }
 
     /// <summary>
-    /// I8: a write is legal only fully inside an erase block the codeplug occupies.
+    /// I8: a write is legal only fully inside the **storage half** of a bank the codeplug
+    /// occupies, and never over a firmware flash signature.
     ///
-    /// The bound is the *block*, not the region, because a write erases its whole block and
-    /// every byte of it has to be rewritten — including the inter-region gaps and unmodelled
-    /// records that share it. Anything outside those blocks (the callsign database, firmware,
-    /// calibration) stays refused. [format §5, d878uv-protocol.md §5.4]
+    /// The bound is the bank's lower 0x20000 rather than a region, because a write erases the
+    /// whole unit and its inter-region gaps have to be rewritten too. It stops at 0x20000
+    /// because past that is the mirror, and writing the mirror corrupts a different bank.
+    /// [format §5, d878uv-protocol.md §5.5/§5.6]
     /// </summary>
     public static bool IsWritable(uint address, int length)
     {
-        uint block = EraseBlockOf(address);
-        return CodeplugEraseBlocks.Contains(block)
-            && (ulong)address + (ulong)length <= (ulong)block + EraseBlockSize;
+        uint bank = BankOf(address);
+        if (!CodeplugBanks.Contains(bank)) return false;
+        if ((ulong)address + (ulong)length > (ulong)bank + BankStorageSize) return false;
+        return !TouchesFlashMarker(address, length);
+    }
+
+    /// <summary>True if [address, address+length) overlaps a firmware flash signature.</summary>
+    public static bool TouchesFlashMarker(uint address, int length)
+    {
+        for (uint a = address; a < address + (uint)length; a++)
+            if (IsFlashMarker(a)) return true;
+        return false;
     }
 
     public static (uint Address, int Offset) ChannelSlot(int index) =>

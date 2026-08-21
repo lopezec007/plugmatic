@@ -234,43 +234,85 @@ public sealed class D878uvProtocol : IRadioProtocol
     }
 
     /// <summary>
-    /// Refused. There is no safe codeplug write for this radio yet, and the reason is a
-    /// hardware fact rather than missing code.
+    /// Write `image` a bank at a time, inside the storage half only.
     ///
-    /// A write erases everything in the aligned 0x40000 window around it and keeps only what
-    /// the session staged, so a write has to rewrite that whole window. But rewriting the
-    /// window means writing addresses the vendor CPS never writes — and doing exactly that
-    /// (2026-08-21) copied channel bank 0 over channel bank 1: the frames all went to
-    /// 0x00800000-0x0083FFF0, yet bank 1's records came back holding bank 0's. Reads also
-    /// show the same 128 KB twice inside some banks and not others, so "which addresses are
-    /// real storage" is not yet a question this project can answer.
-    ///
-    /// What a correct implementation needs: the **writable address set**, derived from what
-    /// the CPS writes, rather than from the region table. See §5.7.
-    /// [protocol §5.4/§5.7]
+    /// Three hardware facts shape this. A write erases everything in the bank and keeps only
+    /// what this session staged, so a bank that changes must be rewritten whole — read it
+    /// back first and splice the modelled bytes over it, and unmodelled records survive
+    /// verbatim. The bank's upper 0x20000 is the same storage read twice, and writing it
+    /// corrupts a *different* bank, so nothing above <see cref="Layout.BankStorageSize"/> is
+    /// ever addressed. And the firmware signature at the end of the unit is the radio's own,
+    /// restored after an erase, so it is skipped rather than written back.
+    /// All reads happen before the first write, the one ordering this radio allows.
+    /// [protocol §5.1/§5.4/§5.6]
     /// </summary>
-    public Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image,
+    public async Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image,
         ReadOnlyMemory<byte>? baseline, IProgress<TransferProgress>? progress, CancellationToken ct)
     {
-        string scope = baseline is { Length: var n } && n == Layout.ImageSize
-            ? $" The change spans {TouchedBlocks(image, baseline.Value).Count} erase window(s)."
-            : "";
-        throw new D878ProtocolException(
-            "Refusing to write: this radio has no proven-safe codeplug write path." + scope +
-            " A write erases the whole 0x40000 window around it, and rewriting that window " +
-            "means sending addresses the vendor CPS never writes — which on 2026-08-21 copied " +
-            "channel bank 0 over channel bank 1. Reading, decoding and backup are unaffected. " +
-            "[d878uv-protocol.md §5.7]");
+        if (image.Length != Layout.ImageSize)
+            throw new D878ProtocolException($"Image must be 0x{Layout.ImageSize:X} bytes, got 0x{image.Length:X}.");
+        if (baseline is not { } basis)
+            throw new D878ProtocolException(
+                "A baseline image is required to write this radio. Every write erases a whole " +
+                "bank, so the write must know which banks change and rewrite each one complete; " +
+                "without the radio's current contents it can do neither. [d878uv-protocol.md §5.7]");
+        if (basis.Length != Layout.ImageSize)
+            throw new D878ProtocolException($"Baseline must be 0x{Layout.ImageSize:X} bytes, got 0x{basis.Length:X}.");
+
+        var banks = TouchedBanks(image, basis);
+        if (banks.Count == 0)
+        {
+            progress?.Report(new TransferProgress("write", 0, 0));
+            return;
+        }
+
+        // 1. Read the storage half of every bank that will be erased. Legal only because
+        //    nothing is staged yet — one write here and these reads discard it. [§5.1 W3/W4]
+        int unit = (int)Layout.BankStorageSize;
+        var contents = new Dictionary<uint, byte[]>(banks.Count);
+        int readDone = 0, readTotal = banks.Count * unit;
+        foreach (var bank in banks)
+        {
+            contents[bank] = await ReadRegionAsync(link, bank, unit, null, "read", ct);
+            readDone += unit;
+            progress?.Report(new TransferProgress("read banks", readDone, readTotal));
+        }
+
+        // 2. Splice the modelled bytes over each bank.
+        foreach (var bank in banks)
+            SpliceModelledBytes(contents[bank], bank, image.Span);
+
+        // 3. Rewrite. Skip all-0xFF chunks (the erase already leaves those, and not writing an
+        //    address is how the CPS marks a slot empty) and skip the firmware signature.
+        var plan = new List<(uint Address, uint Bank, int Offset)>();
+        foreach (var bank in banks)
+        {
+            var data = contents[bank];
+            for (int n = 0; n < unit; n += WriteChunk)
+            {
+                uint address = bank + (uint)n;
+                if (Layout.TouchesFlashMarker(address, WriteChunk)) continue;
+                if (!NeedsWriting(data.AsSpan(n, WriteChunk))) continue;
+                plan.Add((address, bank, n));
+            }
+        }
+
+        int done = 0, total = plan.Count * WriteChunk;
+        foreach (var (address, bank, offset) in plan)
+        {
+            await WriteChunkAsync(link, address, contents[bank].AsMemory(offset, WriteChunk), ct);
+            done += WriteChunk;
+            progress?.Report(new TransferProgress("write", done, total));
+        }
     }
 
     /// <summary>
-    /// The erase windows holding at least one byte that differs between `image` and
-    /// `baseline` — i.e. the blast radius a write would have. Diagnostic only while writing
-    /// is refused. [protocol §5.4]
+    /// The banks holding at least one byte that differs between `image` and `baseline` — the
+    /// blast radius of the write. [protocol §5.4]
     /// </summary>
-    internal static SortedSet<uint> TouchedBlocks(ReadOnlyMemory<byte> image, ReadOnlyMemory<byte> baseline)
+    internal static SortedSet<uint> TouchedBanks(ReadOnlyMemory<byte> image, ReadOnlyMemory<byte> baseline)
     {
-        var blocks = new SortedSet<uint>();
+        var banks = new SortedSet<uint>();
         foreach (var region in Layout.Regions)
         {
             int start = Layout.OffsetOf(region.Address);
@@ -278,14 +320,39 @@ public sealed class D878uvProtocol : IRadioProtocol
             while (n < region.Length)
             {
                 uint address = region.Address + (uint)n;
-                uint block = Layout.EraseBlockOf(address);
-                int len = (int)Math.Min(block + Layout.EraseBlockSize - address, (uint)(region.Length - n));
+                uint bank = Layout.BankOf(address);
+                int len = (int)Math.Min(bank + Layout.BankStride - address, (uint)(region.Length - n));
                 if (!image.Span.Slice(start + n, len).SequenceEqual(baseline.Span.Slice(start + n, len)))
-                    blocks.Add(block);
+                    banks.Add(bank);
                 n += len;
             }
         }
-        return blocks;
+        return banks;
+    }
+
+    /// <summary>
+    /// Overwrite the parts of `unit` the region table describes with the packed `image`.
+    /// Everything else — inter-region gaps, records we do not model — keeps the value just
+    /// read from the radio. [protocol §5.7]
+    /// </summary>
+    internal static void SpliceModelledBytes(Span<byte> unit, uint bank, ReadOnlySpan<byte> image)
+    {
+        uint unitEnd = bank + Layout.BankStorageSize;
+        foreach (var region in Layout.Regions)
+        {
+            uint lo = Math.Max(region.Address, bank);
+            uint hi = Math.Min(region.End, unitEnd);
+            if (hi <= lo) continue;
+            int from = Layout.OffsetOf(region.Address) + (int)(lo - region.Address);
+            image.Slice(from, (int)(hi - lo)).CopyTo(unit[(int)(lo - bank)..]);
+        }
+    }
+
+    /// <summary>An all-0xFF chunk is what the erase already leaves behind — sending it is waste.</summary>
+    private static bool NeedsWriting(ReadOnlySpan<byte> chunk)
+    {
+        foreach (byte b in chunk) if (b != 0xFF) return true;
+        return false;
     }
 
     /// <summary>

@@ -25,6 +25,9 @@ public sealed class RadioSession : IAsyncDisposable
     public static async Task<RadioSession> OpenAsync(
         IRadioDefinition radio, string? portOption, RunContext run, CancellationToken ct)
     {
+        // Radios that own their USB stack are briefly absent after each session; give the
+        // device node a chance to come back before declaring the radio missing. [§2]
+        if (radio.ReEnumeratesAfterSession) await WaitForPortAsync(radio, portOption, ct);
         var port = ResolvePort(radio, portOption);
         var log = run.OpenLog("transfer.log");
         ISerialLink link = new TransferLogLink(new SerialPortLink(), log);
@@ -89,6 +92,17 @@ public sealed class RadioSession : IAsyncDisposable
 
     /// <summary>Grace period for the radio's USB device to come back. [d878uv-protocol.md §2]</summary>
     private static readonly TimeSpan SettleDelay = TimeSpan.FromMilliseconds(1200);
+
+    /// <summary>Poll until a usable port shows up, or give up and let ResolvePort report it.</summary>
+    private static async Task WaitForPortAsync(IRadioDefinition radio, string? portOption, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (DateTime.UtcNow < deadline)
+        {
+            try { ResolvePort(radio, portOption); return; }
+            catch (CliError) { await Task.Delay(400, ct); }
+        }
+    }
 
     /// <summary>Identify + model preflight. Mismatch = abort, no override (I2).</summary>
     public async Task<RadioIdentity> IdentifyAsync(CancellationToken ct)

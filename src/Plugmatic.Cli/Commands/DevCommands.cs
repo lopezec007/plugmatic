@@ -124,7 +124,7 @@ public static class DevCommands
         cmd.SetAction(async (pr, ct) =>
         {
             var radio = Common.Resolve("d878uv");
-            var all = Plugmatic.Radios.D878uv.Format.Layout.CodeplugEraseBlocks.OrderBy(b => b).ToList();
+            var all = Plugmatic.Radios.D878uv.Format.Layout.CodeplugBanks.OrderBy(b => b).ToList();
             List<uint> blocks;
             if (pr.GetValue(blocksOpt) is { } list && list.Trim().Length > 0)
             {
@@ -133,7 +133,7 @@ public static class DevCommands
                 {
                     uint value = Convert.ToUInt32(
                         piece.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? piece[2..] : piece, 16);
-                    uint block = Plugmatic.Radios.D878uv.Format.Layout.EraseBlockOf(value);
+                    uint block = Plugmatic.Radios.D878uv.Format.Layout.BankOf(value);
                     if (!all.Contains(block))
                         throw new CliError($"0x{block:X8} is not an erase block the codeplug occupies.", 1);
                     if (!blocks.Contains(block)) blocks.Add(block);
@@ -146,7 +146,7 @@ public static class DevCommands
             var run = runs.CreateRun(radio.Model, "dev");
             Console.WriteLine($"Run: {run.Directory}");
             var outcome = RunOutcome.Failed;
-            uint blockSize = Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize;
+            uint blockSize = Plugmatic.Radios.D878uv.Format.Layout.BankStride;
             try
             {
                 await using var session = await RadioSession.ReopenAsync(
@@ -260,7 +260,7 @@ public static class DevCommands
                 : Plugmatic.Radios.D878uv.Format.Layout.ChannelBanks
                   + 2 * Plugmatic.Radios.D878uv.Format.Layout.BetweenChannelBanks;
             if (address % 16 != 0) throw new CliError("--address must be 16-byte aligned.", 1);
-            uint block = Plugmatic.Radios.D878uv.Format.Layout.EraseBlockOf(address);
+            uint block = Plugmatic.Radios.D878uv.Format.Layout.BankOf(address);
 
             var runs = new RunManager();
             var run = runs.CreateRun(radio.Model, "dev");
@@ -296,10 +296,10 @@ public static class DevCommands
             try
             {
                 Console.WriteLine($"Probe 0x{address:X8} sits in erase block 0x{block:X8}" +
-                                  $"-0x{block + Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize - 1:X8}.");
+                                  $"-0x{block + Plugmatic.Radios.D878uv.Format.Layout.BankStride - 1:X8}.");
                 Console.WriteLine("Checking the whole block is erased (a write wipes all of it)...");
                 var blockBytes = await ReadAsync(block,
-                    (int)Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize);
+                    (int)Plugmatic.Radios.D878uv.Format.Layout.BankStride);
                 int used = blockBytes.Where((b, i) =>
                     b != 0xFF &&
                     !Plugmatic.Radios.D878uv.Format.Layout.IsFlashMarker(block + (uint)i)).Count();
@@ -335,7 +335,7 @@ public static class DevCommands
                 // FF, so the whole 256 KB returns to erased.
                 await WriteAsync(Enumerable.Repeat((byte)0xFF, 16).ToArray());
                 var cleaned = await ReadAsync(block,
-                    (int)Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize);
+                    (int)Plugmatic.Radios.D878uv.Format.Layout.BankStride);
                 bool clean = !cleaned.Where((b, i) =>
                     b != 0xFF &&
                     !Plugmatic.Radios.D878uv.Format.Layout.IsFlashMarker(block + (uint)i)).Any();

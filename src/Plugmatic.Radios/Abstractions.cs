@@ -33,6 +33,13 @@ public interface IRadioDefinition
     /// staged write the moment it sees a read. [d878uv-protocol.md §5.1]
     /// </summary>
     bool SeparateReadWriteSessions => false;
+
+    /// <summary>
+    /// True when the radio drops and re-creates its own USB device at the end of every
+    /// session. Its port is then briefly absent, which the next command must wait out rather
+    /// than report as "no radio connected". [d878uv-protocol.md §2]
+    /// </summary>
+    bool ReEnumeratesAfterSession => false;
 }
 
 /// <summary>Abstract serial link — the only seam between protocol code and real hardware.</summary>
