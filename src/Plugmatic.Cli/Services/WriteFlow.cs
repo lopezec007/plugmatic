@@ -147,7 +147,7 @@ public static class WriteFlow
                 ["differences"] = post.Equal ? null : string.Join("; ", post.Differences.Take(20)),
             };
             Console.WriteLine(post.Equal
-                ? "Post-write verification: radio image matches (modulo masks)."
+                ? "Post-write verification: the radio's image matches what was written."
                 : "WARNING: post-write differences:\n  " + string.Join("\n  ", post.Differences.Take(20)));
             if (!post.Equal) return 3;
 

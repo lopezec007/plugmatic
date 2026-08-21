@@ -310,25 +310,52 @@ it — storage half, codeplug banks only, never a signature.
 | **Neighbour bank 1, before vs after** | **0 bytes differ** — the §5.5 failure is gone |
 | Restore to the original image | full read byte-identical to the pre-write image |
 
-### 5.8 The upper-half duplicate, and what we cannot put back
+### 5.8 The upper-half duplicate — resolved, the firmware rebuilds it
 
-After a Plugmatic write, the written bank's upper half reads **erased** where it used to
-duplicate the lower half — bank 0 went from 20,264 non-`FF` bytes to 10,132, exactly half.
-It has not regenerated on its own across repeated reads.
+Immediately after a Plugmatic write, the written bank's upper half reads **erased** where
+it had duplicated the lower half: bank 0 went from 20,264 non-`FF` bytes to 10,132, exactly
+half, and it did not come back across repeated reads. That was logged here as an open risk —
+a radio written by Plugmatic might carry one fewer firmware recovery copy than a CPS-written
+one.
 
-What that means, stated honestly:
+**It is not a risk. The firmware rebuilds it.** After a power cycle the radio came up
+normally and bank 0's duplicate was present again, matching the restored lower half.
+(verified: hw, 2026-08-21.)
 
-- The duplicate is firmware-made. The CPS never writes those addresses, so it did not put
-  it there; the radio did, at some point we have not identified.
-- **We cannot recreate it.** Writing that half is precisely what corrupted a neighbouring
-  bank in §5.5, so it is not something to attempt.
-- Everything the radio's codeplug is read from — every region, and every address the CPS
-  writes — lives in the storage half and is verified correct.
+Two things fell out of checking it:
 
-So the risk is bounded but not zero: if the firmware treats the duplicate as a recovery
-copy, a radio written by Plugmatic has one fewer safety net than one written by the CPS
-until the firmware rebuilds it. Whether it rebuilds it (on power-cycle, on its own write
-path, or never) is **not yet known** and is the open question in this area.
+- Bank 1, `zoneChannels`, `scanLists[0]` and `zoneNames` still duplicated, as controls.
+- **`settings` went the other way** — duplicate present before, erased after — in a bank
+  Plugmatic has never written (confirmed from the transfer log: 640 frames, all in
+  `0x00800000`). So these halves are firmware-managed state that changes on the radio's own
+  schedule, in both directions, independent of anything the host does. They are not a
+  property of the codeplug and nothing should try to write, preserve or verify them.
+
+### 5.8.1 The settings bank drifts on its own (hw, 2026-08-21)
+
+A read taken after the power cycle differs from the image written moments earlier, in 647
+bytes, all inside the settings bank and none of it caused by the host:
+
+| Range | Bytes | Change |
+|---|---|---|
+| `0x0250011A` | 1 | `00` → `0E` — current-zone runtime state (this radio has 16 zones) |
+| `0x02501106-0x025011FF` | 250 | `00` → `FF` — the tail of `dmrAprsMessage` |
+| `0x02501474-0x025015FF` | 396 | `00` → `FF` — the tail of `settingsExtension` |
+
+The two large runs are **region tails going from programmed `00` to erased `FF`**: the
+firmware rewrote the settings unit during the power cycle and did not program its padding,
+exactly as our own write path skips all-`FF` chunks. The CPS *had* programmed them as `00`.
+Unused padding either way.
+
+**Consequence for verification.** `D878uvCodec.Compare` is currently a plain byte
+comparison — this radio has no volatile-region list, unlike the DM-32UV. The post-write
+verification still passes because it runs before the radio has touched anything, but a
+backup compared against a read taken after a power cycle will show these 647 bytes.
+
+**VERIFY (not yet done):** whether to give this codec a volatile-region list, and what
+belongs in it. One power cycle is a single sample; declaring a region volatile stops
+verifying it, so it needs more observation than this before it is worth the loss of
+coverage. Until then the drift is documented rather than masked.
 
 ### 5.9 What this has cost, and the rules that come out of it
 
@@ -400,7 +427,9 @@ frames, the same count the CPS sends, every one inside its footprint — compute
 | 2026-08-21 | The CPS writes 0 of 96,352 bytes at `bank + 0x20000` or above, across 21 banks | **verified** — from the capture |
 | 2026-08-21 | Storage-half write path: intended byte applied, neighbour bank 0 bytes differ, full-image verification matches | **verified** — 640 frames, same count the CPS sends for that bank |
 | 2026-08-21 | Restore to the original image after a write | **verified** — full read byte-identical |
-| 2026-08-21 | The upper-half duplicate does not regenerate after a Plugmatic write | **verified** — open question §5.8 |
+| 2026-08-21 | The upper-half duplicate does not regenerate after a Plugmatic write, but **does** after a power cycle | **verified** — §5.8, question closed |
+| 2026-08-21 | Bank halves change state in both directions with no host write (`settings` lost its duplicate untouched) | **verified** — firmware-managed, not codeplug |
+| 2026-08-21 | Settings bank drifts across a power cycle: 1 runtime byte + 646 bytes of region-tail padding `00`→`FF` | **verified** — §5.8.1 |
 
 **USB re-enumeration (hw-verified).** This radio drops and re-creates its USB device
 when a session ends, so `/dev/ttyACM*` is recreated after *every* command and any
