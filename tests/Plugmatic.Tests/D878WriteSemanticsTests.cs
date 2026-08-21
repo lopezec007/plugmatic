@@ -1,3 +1,5 @@
+using Plugmatic.Core.Model;
+using Plugmatic.Radios;
 using Plugmatic.Radios.D878uv.Format;
 using Plugmatic.Radios.D878uv.Protocol;
 
@@ -249,5 +251,87 @@ public class D878WriteSemanticsTests
         long readBytes = radio.Log.Where(e => e.StartsWith("R:")).Sum(e => long.Parse(e.Split('+')[1]));
         Assert.True(readBytes >= Layout.BankStorageSize,
                     $"only {readBytes} bytes read; a bank's storage is {Layout.BankStorageSize}");
+    }
+}
+
+/// <summary>
+/// Slot assignment has to keep IR order, because Decode enumerates bitmaps in index order.
+/// Regression test for the reordering the I3 gate caught on 2026-08-21: with a base image
+/// whose allocation has a gap, every item past the gap was encoded into one slot and read
+/// back from another. [format §4]
+/// </summary>
+public class D878SlotOrderTests
+{
+    private static readonly Plugmatic.Radios.IRadioCodec Codec = D878uvCodec.Instance;
+
+    private static readonly string[] PlainBitmaps =
+        ["channelBitmap", "zoneBitmap", "scanListBitmap", "radioIdBitmap", "hiddenZoneBitmap", "groupListBitmap"];
+
+    /// <summary>An erased radio: 0xFF everywhere, with the set-means-allocated bitmaps cleared.</summary>
+    private static byte[] BlankBase()
+    {
+        var image = new byte[Layout.ImageSize];
+        Array.Fill(image, (byte)0xFF);
+        foreach (var name in PlainBitmaps)
+        {
+            var region = Layout.Regions.First(r => r.Name == name);
+            image.AsSpan(Layout.OffsetOf(region.Address), region.Length).Clear();
+        }
+        return image;                       // contactBitmap is inverted, so 0xFF = none allocated
+    }
+
+    /// <summary>Bitmaps are LSB-first; the contact bitmap is inverted. [format §3/§4]</summary>
+    private static void SetAllocated(byte[] image, uint bitmap, int index, bool allocated, bool inverted)
+    {
+        int at = Layout.OffsetOf(bitmap) + index / 8;
+        int mask = 1 << (index % 8);
+        bool bit = inverted ? !allocated : allocated;
+        image[at] = (byte)(bit ? image[at] | mask : image[at] & ~mask);
+    }
+
+    /// <summary>Leave 0-9 and 40-49 allocated, 10-39 free — a gap right after slot 9.</summary>
+    private static byte[] WithGap(byte[] image, uint bitmap, bool inverted)
+    {
+        for (int i = 10; i < 40; i++) SetAllocated(image, bitmap, i, false, inverted);
+        for (int i = 40; i < 50; i++) SetAllocated(image, bitmap, i, true, inverted);
+        return image;
+    }
+
+    private static AnalogChannel Ch(int i) => new()
+    {
+        Name = $"CH{i:D3}",
+        RxFrequency = Frequency.FromMHz(430.0m + i * 0.0125m),
+        TxFrequency = Frequency.FromMHz(430.0m + i * 0.0125m),
+    };
+
+    [Fact]
+    public void Channels_keep_their_order_when_the_base_allocation_has_gaps()
+    {
+        var seed = new Codeplug();
+        for (int i = 0; i < 20; i++) seed.Channels.Add(Ch(i));
+        var basis = WithGap(Codec.Encode(seed, BlankBase()), Layout.ChannelBitmap, inverted: false);
+
+        var ir = new Codeplug();
+        for (int i = 0; i < 120; i++) ir.Channels.Add(Ch(i));
+
+        var decoded = Codec.Decode(Codec.Encode(ir, basis));
+        Assert.Equal(ir.Channels.Count, decoded.Channels.Count);
+        Assert.Equal(ir.Channels.Select(c => c.Name), decoded.Channels.Select(c => c.Name));
+    }
+
+    [Fact]
+    public void Contacts_keep_their_order_when_the_base_allocation_has_gaps()
+    {
+        var seed = new Codeplug();
+        for (int i = 0; i < 20; i++)
+            seed.Contacts.Add(new Contact { Name = $"TG{i:D3}", Type = CallType.Group, DmrId = (uint)(1000 + i) });
+        var basis = WithGap(Codec.Encode(seed, BlankBase()), Layout.ContactBitmap, inverted: true);
+
+        var ir = new Codeplug();
+        for (int i = 0; i < 60; i++)
+            ir.Contacts.Add(new Contact { Name = $"TG{i:D3}", Type = CallType.Group, DmrId = (uint)(1000 + i) });
+
+        var decoded = Codec.Decode(Codec.Encode(ir, basis));
+        Assert.Equal(ir.Contacts.Select(c => c.Name), decoded.Contacts.Select(c => c.Name));
     }
 }

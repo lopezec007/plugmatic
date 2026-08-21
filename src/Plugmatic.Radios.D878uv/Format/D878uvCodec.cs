@@ -92,6 +92,15 @@ public sealed class D878uvCodec : IRadioCodec
 
         foreach (var slot in slots) SetAllocated(image, bitmap, slot, true, inverted);
         foreach (var slot in allocated) if (!used.Contains(slot)) SetAllocated(image, bitmap, slot, false, inverted);
+
+        // Ascending, and this is load-bearing. Slots are chosen by reusing what the base image
+        // already had allocated and then filling the gaps, which produces a set like
+        // [0..51, 100..131, 52..99, ...]. Decode enumerates the bitmap in index order, so
+        // handing back the selection order would silently reorder every item past the first
+        // gap — item 53 encoded into slot 100 and read back as whatever sits in slot 52.
+        // Caught by the I3 round-trip gate when the first plug larger than the radio's
+        // existing 84 channels was built. [format §4]
+        slots.Sort();
         return [.. slots];
     }
 
