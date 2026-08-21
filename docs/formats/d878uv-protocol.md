@@ -199,8 +199,13 @@ same session. Every other byte in the block comes back `0xFF`.
 | a 16-byte probe at `0x00840000` | erased `0x00840000-0x0087FFFF`; `0x00800030` survived it |
 
 The last row bounds the block from both sides: `0x00800030` and `0x00840000` are 0x3FFD0
-apart and land in *different* blocks, so the block is exactly 0x40000, aligned — which is
+apart and land in *different* blocks, so the affected span is 0x40000, aligned — which is
 also the channel-bank stride `BetweenChannelBanks`.
+
+**Caveat added 2026-08-21.** "0x40000 goes FF" is what was *observed*; it is not
+necessarily one 0x40000 erase page. Some 0x20000 spans read back duplicated (§5.5), so a
+128 KB erase would look like 256 KB through that duplication. Treat 0x40000 as the blast
+radius to check for damage, not as a proven page size.
 
 This reframes §5.1 entirely. Staging is not an optimisation; it is how the radio
 assembles a complete block before erasing and reprogramming it. It also explains the
@@ -218,28 +223,61 @@ codeplug data: it is present in blocks Plugmatic has never written, and it is ba
 place after an erase. Anything asking "is this block empty?" must ignore it
 (`Layout.IsFlashMarker`).
 
-### 5.5 Why write support is still off
+### 5.5 The block-rewrite approach, and why hardware rejected it (2026-08-21)
 
-The protocol is solved. The **region table** is what blocks writes: it describes
-1.63 MB scattered across erase blocks that hold considerably more, so writing any block
-would wipe codeplug bytes Plugmatic has never read and cannot put back. Concretely, the
-block at `0x00800000` is covered for 0x2000 of 0x40000 bytes, yet the CPS keeps real
-channel data at `0x00802000-0x00802D00` and `0x00803900-0x00804000` — outside every
-region we model.
+§5.4 says a write erases its whole 0x40000 window, so the obvious fix is: read the window
+in full, splice the modelled bytes over it, rewrite it complete. Unmodelled bytes make the
+round trip verbatim and nobody has to understand them. That was implemented and tested
+against a fake radio that models block erase, then run on hardware with a one-byte channel
+rename (`'1'` → `'Z'` at `0x0080002B`).
 
-`D878uvRadio.SupportsWrite` is therefore **false**, and `BuildWritePlan` refuses rather
-than silently wiping. Two ways forward, in preference order:
+**Over the target window it worked perfectly.** A rawdump of `0x00800000-0x0083FFFF` before
+and after showed exactly one byte changed, with the non-FF byte count identical either side
+(20,264). Preservation of unmodelled bytes did what it promised.
 
-1. **Read whole erase blocks.** In the read phase, read each block that needs to change
-   in full (raw, not through the region table), splice the modelled changes into it, and
-   write the block back complete. This preserves unmodelled bytes byte-for-byte without
-   having to understand them, and needs no format work.
-2. **Extend the region table** to cover whole erase blocks. Larger change: it moves the
-   packed image layout and invalidates existing `.bin` backups.
+**It also silently copied channel bank 0 over channel bank 1.** The 4,854 bytes of
+`channels[1]` came back holding bank 0's records — `0x00840020` read `Channel 1` where
+`GMRS RPTR 7` belonged. The transfer log settles what the host did: 1,282 write frames, all
+inside `0x00800000-0x0083FFF0`, **not one frame addressed to `0x00840000`**. The radio did
+that itself, in response to what we wrote.
 
-Until one of those lands, the write path exists, is guarded, and refuses.
+Two observations bound the cause, and neither was known before:
 
-### 5.6 What this cost, and the rule that comes out of it
+- **Some 0x20000 spans read back twice.** `0x00800000-0x00820000` and
+  `0x00820000-0x00840000` are byte-identical (131,072/131,072), as are the two halves of
+  bank 1, `zoneChannels`, `settings` and `zoneNames`. Others are *not*: `contacts[0]` at
+  `0x02680000` is real data with `0x026A0000` erased, and `0x024C0000` / `0x024E0000` hold
+  different data. So it is not a blanket address-decode rule, and this project cannot
+  currently say which addresses are distinct storage.
+- The duplicate at `0x00820000` **pre-dates the write** — it is in the rawdump taken before
+  any write that day. It was never noticed because §5.4's model was only ever checked
+  against CPS-*written* addresses, never against the gaps between them.
+
+The write went wrong precisely where it left the vendor's footprint: everything the CPS
+writes for bank 0 lives below `0x00804000`, and the frames that had no counterpart in the
+capture were the ones above `0x00820000` — the duplicated half.
+
+### 5.6 Why write support is off — and what would turn it on
+
+`D878uvRadio.SupportsWrite` is **false** and `WriteImageAsync` refuses. The protocol is
+solved; the **addressing** is not. Rewriting an erase window is only safe if every address
+in it is real, independent storage, and §5.5 shows that is not true and not yet predictable.
+
+The way forward is to stop deriving write addresses from the region table and derive them
+from the vendor instead:
+
+1. **Model the writable address set from the CPS capture** — the allocated records, the
+   bitmaps and the settings blocks it writes, and nothing else. The capture is 96,352 bytes
+   across known ranges, and a radio programmed that way demonstrably works.
+2. **Never write an address the CPS does not.** Every failure so far, including the two
+   erased channel banks in §5.7 and the bank copy above, came from writing outside that set.
+3. Only then re-run the ladder, checking damage over the whole erase window with
+   `plugmatic dev rawdump`, and — the part that caught this one — over *neighbouring* banks
+   too, not just the window that was written.
+
+Until that exists, `plugmatic read` and backup are unaffected and complete.
+
+### 5.7 What this has cost, and the rules that come out of it
 
 Establishing §5.4 destroyed live data on the test radio: two 16-byte probes at
 `0x00800030` and `0x00840000` erased channel banks 0 and 1, losing 5,224 bytes of
@@ -252,11 +290,21 @@ The probe that did the damage had *passed*. It read its 16 bytes back, saw the m
 restored the original, and reported success — because it only ever looked at the 16
 bytes it wrote. The blast radius was 16,384× the size of the thing being verified.
 
-**The rule: before writing to a radio for the first time, establish the erase
-granularity, and check for damage over that whole granularity — not over the bytes you
-wrote.** A mutation test that only re-reads its own target cannot see the crater around
-it. `plugmatic dev writetest` now refuses to probe any block that holds data, and works
-only in flash it has confirmed is empty.
+**Rule 1: before writing to a radio for the first time, establish the erase granularity,
+and check for damage over that whole granularity — not over the bytes you wrote.** A
+mutation test that only re-reads its own target cannot see the crater around it.
+`plugmatic dev writetest` now refuses to probe any block that holds data, and works only in
+flash it has confirmed is empty.
+
+**Rule 2 (2026-08-21): check the neighbours too.** The block-rewrite attempt in §5.5 passed
+a full 256 KB before/after rawdump of the window it wrote, and had still corrupted the bank
+next door. Erase-granularity verification is a floor, not a ceiling — the only sufficient
+check is a full read compared against the intended image, which is what caught it.
+
+**Rule 3: on a radio whose vendor tool has been captured, treat the captured address set as
+the writable address set.** Every byte lost on this radio was at an address the CPS never
+writes. Staying inside the vendor's footprint is not a heuristic here; it is the only
+evidence-backed definition of "safe to write" this project has.
 
 ## 6. Safety rules (D14 / I8)
 
@@ -288,6 +336,10 @@ only in flash it has confirmed is empty.
 | 2026-08-20 | A write erases the block and keeps only what the session staged | **verified** — cost 5,224 bytes of live channel data, since restored |
 | 2026-08-20 | Firmware flash signature at the end of every 0x20000 half-block | **verified** — present in never-written blocks, restored after erase |
 | 2026-08-20 | Damaged blocks restored from the CPS capture | **verified** — 32,768 bytes, zero mismatches |
+| 2026-08-21 | Block-rewrite write path preserves unmodelled bytes in the written window | **verified** — 1 byte changed in 256 KB, non-FF count identical |
+| 2026-08-21 | …and corrupts the *next* bank: writing only 0x00800000-0x0083FFF0 put bank 0's records into bank 1 | **verified** — from the transfer log; write support withdrawn |
+| 2026-08-21 | Some 0x20000 spans read back duplicated (channel banks, settings, zoneNames, zoneChannels), others do not (contacts, 0x024C0000) | **verified** — pre-dates any write |
+| 2026-08-21 | Both banks restored by replaying the CPS frames for them | **verified** — full image byte-identical to the pre-write read; window rawdump 0 bytes differ |
 
 **USB re-enumeration (hw-verified).** This radio drops and re-creates its USB device
 when a session ends, so `/dev/ttyACM*` is recreated after *every* command and any

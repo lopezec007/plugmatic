@@ -192,8 +192,8 @@ public sealed class D878uvProtocol : IRadioProtocol
             throw new D878ProtocolException($"Writes must be {WriteChunk} bytes, got {data.Length}.");
         if (!Layout.IsWritable(address, data.Length))
             throw new D878ProtocolException(
-                $"I8 bounds violation: 0x{address:X8}+{data.Length} is outside the codeplug regions " +
-                "in d878uv-format.md. Refusing.");
+                $"I8 bounds violation: 0x{address:X8}+{data.Length} is outside the erase blocks the " +
+                "codeplug occupies (d878uv-format.md). Refusing.");
 
         await EnterProgramModeAsync(link, ct);
         var frame = new byte[WriteChunk + 8];
@@ -234,87 +234,59 @@ public sealed class D878uvProtocol : IRadioProtocol
     }
 
     /// <summary>
-    /// Write `image`, sending only the 16-byte chunks that differ from `baseline` when one
-    /// is supplied. Nothing is committed until <see cref="EndSessionAsync"/> sends `END`,
-    /// and no read may happen in between. [protocol §5.1/§5.3]
+    /// Refused. There is no safe codeplug write for this radio yet, and the reason is a
+    /// hardware fact rather than missing code.
+    ///
+    /// A write erases everything in the aligned 0x40000 window around it and keeps only what
+    /// the session staged, so a write has to rewrite that whole window. But rewriting the
+    /// window means writing addresses the vendor CPS never writes — and doing exactly that
+    /// (2026-08-21) copied channel bank 0 over channel bank 1: the frames all went to
+    /// 0x00800000-0x0083FFF0, yet bank 1's records came back holding bank 0's. Reads also
+    /// show the same 128 KB twice inside some banks and not others, so "which addresses are
+    /// real storage" is not yet a question this project can answer.
+    ///
+    /// What a correct implementation needs: the **writable address set**, derived from what
+    /// the CPS writes, rather than from the region table. See §5.7.
+    /// [protocol §5.4/§5.7]
     /// </summary>
-    public async Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image,
+    public Task WriteImageAsync(ISerialLink link, ReadOnlyMemory<byte> image,
         ReadOnlyMemory<byte>? baseline, IProgress<TransferProgress>? progress, CancellationToken ct)
     {
-        if (image.Length != Layout.ImageSize)
-            throw new D878ProtocolException($"Image must be 0x{Layout.ImageSize:X} bytes, got 0x{image.Length:X}.");
-        if (baseline is { } b && b.Length != Layout.ImageSize)
-            throw new D878ProtocolException($"Baseline must be 0x{Layout.ImageSize:X} bytes, got 0x{b.Length:X}.");
-
-        var plan = BuildWritePlan(image, baseline);
-        int total = plan.Count * WriteChunk, done = 0;
-        foreach (var (address, offset) in plan)
-        {
-            await WriteChunkAsync(link, address, image.Slice(offset, WriteChunk), ct);
-            done += WriteChunk;
-            progress?.Report(new TransferProgress("write", done, total));
-        }
+        string scope = baseline is { Length: var n } && n == Layout.ImageSize
+            ? $" The change spans {TouchedBlocks(image, baseline.Value).Count} erase window(s)."
+            : "";
+        throw new D878ProtocolException(
+            "Refusing to write: this radio has no proven-safe codeplug write path." + scope +
+            " A write erases the whole 0x40000 window around it, and rewriting that window " +
+            "means sending addresses the vendor CPS never writes — which on 2026-08-21 copied " +
+            "channel bank 0 over channel bank 1. Reading, decoding and backup are unaffected. " +
+            "[d878uv-protocol.md §5.7]");
     }
 
     /// <summary>
-    /// The 16-byte chunks to send, ascending by address.
-    ///
-    /// A write erases the whole 256 KB block around it (Layout.EraseBlockSize), so a plan
-    /// cannot be "just the chunks that changed": every byte of every block it touches has
-    /// to be rewritten in the same session or it comes back 0xFF. That makes the region
-    /// table the limiting factor — it describes 1.63 MB scattered across blocks that hold
-    /// considerably more, so writing a block would destroy codeplug bytes Plugmatic has
-    /// never read. Blocks like that are refused, by address, rather than silently wiped.
-    /// [protocol §5.3/§5.4]
+    /// The erase windows holding at least one byte that differs between `image` and
+    /// `baseline` — i.e. the blast radius a write would have. Diagnostic only while writing
+    /// is refused. [protocol §5.4]
     /// </summary>
-    internal static List<(uint Address, int Offset)> BuildWritePlan(
-        ReadOnlyMemory<byte> image, ReadOnlyMemory<byte>? baseline)
+    internal static SortedSet<uint> TouchedBlocks(ReadOnlyMemory<byte> image, ReadOnlyMemory<byte> baseline)
     {
-        // 1. Which erase blocks hold a byte that has to change?
-        var touched = new SortedSet<uint>();
+        var blocks = new SortedSet<uint>();
         foreach (var region in Layout.Regions)
         {
             int start = Layout.OffsetOf(region.Address);
-            for (int n = 0; n < region.Length; n += WriteChunk)
+            int n = 0;
+            while (n < region.Length)
             {
-                int len = Math.Min(WriteChunk, region.Length - n);
-                if (Unchanged(image, baseline, start + n, len)) continue;
-                touched.Add(Layout.EraseBlockOf(region.Address + (uint)n));
+                uint address = region.Address + (uint)n;
+                uint block = Layout.EraseBlockOf(address);
+                int len = (int)Math.Min(block + Layout.EraseBlockSize - address, (uint)(region.Length - n));
+                if (!image.Span.Slice(start + n, len).SequenceEqual(baseline.Span.Slice(start + n, len)))
+                    blocks.Add(block);
+                n += len;
             }
         }
-
-        // 2. Refuse any block the region table does not fully describe.
-        var underCovered = touched
-            .Select(block => (Block: block, Covered: Layout.CoveredBytesInBlock(block)))
-            .Where(x => x.Covered < Layout.EraseBlockSize)
-            .ToList();
-        if (underCovered.Count > 0)
-        {
-            var first = underCovered[0];
-            throw new D878ProtocolException(
-                $"Refusing to write: {underCovered.Count} erase block(s) would be wiped but are " +
-                "only partly described by the region table. Writing 16 bytes erases the whole " +
-                $"0x{Layout.EraseBlockSize:X} block, so every byte in it must be rewritten from a " +
-                "known value. Block 0x" + $"{first.Block:X8} is covered for only 0x{first.Covered:X} " +
-                $"of 0x{Layout.EraseBlockSize:X} bytes; the rest is codeplug data Plugmatic has " +
-                "never read and could not put back. [d878uv-protocol.md §5.4]");
-        }
-
-        // 3. Rewrite every touched block in full. Regions inside a fully covered block are
-        //    contiguous in the packed image, so the block maps to one contiguous slice.
-        var plan = new List<(uint, int)>();
-        foreach (var block in touched)
-        {
-            int start = Layout.OffsetOf(block);
-            for (uint n = 0; n < Layout.EraseBlockSize; n += WriteChunk)
-                plan.Add((block + n, start + (int)n));
-        }
-        return plan;
+        return blocks;
     }
-
-    /// <summary>True when `len` bytes at `at` are identical in image and baseline.</summary>
-    private static bool Unchanged(ReadOnlyMemory<byte> image, ReadOnlyMemory<byte>? baseline, int at, int len)
-        => baseline is { } b && b.Span.Slice(at, len).SequenceEqual(image.Span.Slice(at, len));
 
     /// <summary>
     /// Leave program mode. After writes this is the **commit point**, not a teardown

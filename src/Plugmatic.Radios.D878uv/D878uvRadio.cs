@@ -20,11 +20,10 @@ public sealed class D878uvRadio : IRadioDefinition
     public IReadOnlyList<string> KnownUsbIds { get; } = ["28e9:018a", "0483:5740"];
 
     /// <summary>
-    /// The write *protocol* is hardware-verified (staged writes, commit on `END`), but the
-    /// codeplug write path is not safe yet: a write erases the whole 256 KB block around it,
-    /// and the region table describes only part of each block, so writing would destroy
-    /// codeplug bytes we have never read. Blocked on extending the region table to whole
-    /// erase blocks. [d878uv-protocol.md §5.4]
+    /// Read/backup only. The serial write protocol is solved, but the *addressing* is not:
+    /// a write erases the whole 0x40000 window around it, and rewriting that window sends
+    /// addresses the vendor CPS never writes — which on 2026-08-21 copied channel bank 0
+    /// over channel bank 1 on this unit. [d878uv-protocol.md §5.7]
     /// </summary>
     public bool SupportsWrite => false;
 

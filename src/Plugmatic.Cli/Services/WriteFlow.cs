@@ -43,9 +43,10 @@ public static class WriteFlow
                 }
                 return shared;
             }
-            var session = first
-                ? await RadioSession.OpenAsync(radio, portOption, run, ct)
-                : await RadioSession.ReopenAsync(radio, portOption, run, ReopenTimeout, ct);
+            // Always wait, including for the first session: the radio drops its USB device at
+            // the end of every session, and the one that just ended may have been a previous
+            // command's. [d878uv-protocol.md §2]
+            var session = await RadioSession.ReopenAsync(radio, portOption, run, ReopenTimeout, ct);
             await IdentifyAndRecordAsync(session);
             return session;
         }

@@ -25,6 +25,29 @@ public sealed class FakeAnytoneRadio : ISerialLink
     /// <summary>Counts writes a read discarded — the §5.1 W3 trap, made visible to tests.</summary>
     public int DiscardedWriteCount { get; private set; }
 
+    /// <summary>Erase blocks this radio has erased, in order. [§5.4]</summary>
+    public List<uint> ErasedBlocks { get; } = [];
+
+    /// <summary>
+    /// `END` commits — and committing means erasing every block the session staged a byte
+    /// into, then programming only the staged bytes. Anything else that was in those blocks
+    /// is gone. This is the behaviour that cost real channel data on hardware, so the fake
+    /// models it: a test that writes carelessly fails here instead of on a radio.
+    /// [d878uv-protocol.md §5.4]
+    /// </summary>
+    private void Commit()
+    {
+        foreach (var block in _staged.Keys.Select(Layout.EraseBlockOf).Distinct().OrderBy(b => b))
+        {
+            ErasedBlocks.Add(block);
+            foreach (var addr in Memory.Keys
+                         .Where(a => a >= block && a < block + Layout.EraseBlockSize).ToList())
+                Memory.Remove(addr);                       // erased to 0xFF
+        }
+        foreach (var (addr, value) in _staged) Memory[addr] = value;
+        _staged.Clear();
+    }
+
     public string Model { get; init; } = "D878UV2";
     public string Version { get; init; } = "V300";
     public Dictionary<uint, byte> Memory { get; } = [];
@@ -77,8 +100,7 @@ public sealed class FakeAnytoneRadio : ISerialLink
         if (Starts("END"u8))
         {
             Take(3); Log.Add("END");
-            foreach (var (addr, value) in _staged) Memory[addr] = value;   // END is the commit
-            _staged.Clear();
+            Commit();
             _program = false;
             Send(0x06);
             return true;
@@ -243,9 +265,9 @@ public class D878ProtocolTests
     }
 
     [Fact]
-    public void Writing_stays_disabled_while_the_region_table_cannot_cover_an_erase_block()
+    public void Writing_stays_disabled_until_the_writable_address_set_is_known()
     {
-        // The protocol is proven; the region table is what blocks writes. See §5.4.
+        // The protocol is solved; the addressing is not. See d878uv-protocol.md §5.7.
         var radio = Plugmatic.Radios.D878uv.D878uvRadio.Instance;
         Assert.False(radio.SupportsWrite);
         Assert.True(radio.SeparateReadWriteSessions);

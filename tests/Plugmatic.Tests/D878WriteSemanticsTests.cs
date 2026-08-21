@@ -77,7 +77,7 @@ public class D878WriteSemanticsTests
         Assert.Equal(0x33, radio.Memory[Layout.ChannelBanks + 0xF0]);
     }
 
-    // ------------------------------------------------- erase blocks and the write plan
+    // ------------------------------------------------- erase blocks and block-safe writes
 
     [Fact]
     public void An_erase_block_is_256KB_and_aligned()
@@ -89,49 +89,64 @@ public class D878WriteSemanticsTests
     }
 
     [Fact]
-    public void An_unchanged_image_touches_no_block_and_needs_no_writes()
+    public void Writes_are_bounded_to_the_erase_blocks_the_codeplug_occupies()
     {
-        var image = new byte[Layout.ImageSize];
-        Assert.Empty(D878uvProtocol.BuildWritePlan(image, image));
+        // Inside a codeplug block but described by no region: legal, because rewriting the
+        // block is the only way to change anything in it. [protocol §5.4]
+        Assert.True(Layout.IsWritable(0x00802000, 16));
+        Assert.True(Layout.IsWritable(Layout.ChannelBanks, 16));
+
+        // Outside every codeplug block: still refused. The callsign database lives here.
+        Assert.False(Layout.IsWritable(0x04340000, 16));
+        // A chunk may not straddle two blocks.
+        Assert.False(Layout.IsWritable(Layout.ChannelBanks + Layout.EraseBlockSize - 8, 16));
     }
 
     [Fact]
-    public void Changing_one_byte_is_refused_because_its_erase_block_is_only_partly_described()
+    public void Only_blocks_that_actually_change_are_named()
     {
-        // Writing 16 bytes erases 256 KB. The region table describes 0x2000 of the block at
-        // 0x00800000 and nothing of the rest, and the CPS demonstrably keeps real channel
-        // data at 0x00802000-0x00804000 — so this write would destroy it. [§5.4]
         var baseline = new byte[Layout.ImageSize];
         var image = (byte[])baseline.Clone();
-        image[Layout.OffsetOf(Layout.ChannelBanks) + 0x30] ^= 0x5A;
+        Assert.Empty(D878uvProtocol.TouchedBlocks(image, baseline));
 
-        var e = Assert.Throws<D878ProtocolException>(() => D878uvProtocol.BuildWritePlan(image, baseline));
-        Assert.Contains("00800000", e.Message);
-        Assert.Contains("erase block", e.Message.ToLowerInvariant());
+        image[Layout.OffsetOf(Layout.ChannelBanks) + 0x30] ^= 0x5A;
+        Assert.Equal([0x00800000u], D878uvProtocol.TouchedBlocks(image, baseline));
+
+        image[Layout.OffsetOf(Layout.ChannelBanks + Layout.BetweenChannelBanks)] ^= 0x01;
+        Assert.Equal([0x00800000u, 0x00840000u], D878uvProtocol.TouchedBlocks(image, baseline));
     }
 
     [Fact]
-    public async Task A_whole_image_write_is_refused_rather_than_wiping_what_it_cannot_restore()
+    public async Task Codeplug_writes_are_refused_until_the_writable_address_set_is_known()
     {
+        // Not a placeholder: rewriting a whole erase window sends addresses the vendor CPS
+        // never writes, and doing so copied channel bank 0 over bank 1 on hardware. [§5.7]
         var radio = new FakeAnytoneRadio();
         var proto = Fast();
         await proto.IdentifyAsync(radio, CancellationToken.None);
 
-        await Assert.ThrowsAsync<D878ProtocolException>(() =>
-            proto.WriteImageAsync(radio, new byte[Layout.ImageSize], null, null, CancellationToken.None));
+        var baseline = new byte[Layout.ImageSize];
+        var image = (byte[])baseline.Clone();
+        image[Layout.OffsetOf(Layout.ChannelBanks) + 0x30] = 0x5A;
 
-        // Refused before a single frame went out.
+        var e = await Assert.ThrowsAsync<D878ProtocolException>(() =>
+            proto.WriteImageAsync(radio, image, baseline, null, CancellationToken.None));
+        Assert.Contains("Refusing to write", e.Message);
         Assert.DoesNotContain(radio.Log, entry => entry.StartsWith("W:"));
+        Assert.Empty(radio.ErasedBlocks);
     }
 
     [Fact]
-    public void Every_region_lives_in_a_block_the_table_cannot_yet_fully_cover()
+    public void The_blast_radius_of_a_change_is_reported_in_erase_windows()
     {
-        // Documents the exact gap that blocks write support: if this ever starts failing,
-        // the region table has grown to cover whole erase blocks and writes can be enabled.
-        var blocks = Layout.Regions.Select(r => Layout.EraseBlockOf(r.Address)).Distinct();
-        Assert.All(blocks, block =>
-            Assert.True(Layout.CoveredBytesInBlock(block) < Layout.EraseBlockSize,
-                        $"block 0x{block:X8} is now fully covered — revisit SupportsWrite"));
+        var baseline = new byte[Layout.ImageSize];
+        var image = (byte[])baseline.Clone();
+        Assert.Empty(D878uvProtocol.TouchedBlocks(image, baseline));
+
+        image[Layout.OffsetOf(Layout.ChannelBanks) + 0x30] ^= 0x5A;
+        Assert.Equal([0x00800000u], D878uvProtocol.TouchedBlocks(image, baseline));
+
+        image[Layout.OffsetOf(Layout.ChannelBanks + Layout.BetweenChannelBanks)] ^= 0x01;
+        Assert.Equal([0x00800000u, 0x00840000u], D878uvProtocol.TouchedBlocks(image, baseline));
     }
 }

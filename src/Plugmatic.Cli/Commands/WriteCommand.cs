@@ -25,12 +25,14 @@ public static class WriteCommand
             if (!def.SupportsWrite)
                 throw new CliError(
                     $"{def.DisplayName} support is read-only in this build.\n" +
-                    "The serial write protocol is hardware-verified, but this radio erases a 256 KB " +
-                    "flash block on every write and keeps only what that session staged, and the " +
-                    "region table describes just part of each block — so writing would destroy " +
-                    "codeplug data Plugmatic has never read. See docs/formats/d878uv-protocol.md " +
-                    "§5.4-§5.5.\nReading, decoding and backup are unaffected: plugmatic read --radio " +
-                    $"{def.Model}", 1);
+                    "The serial write protocol is hardware-verified, but the addressing is not: a " +
+                    "write erases the whole 0x40000 window around it, and rewriting that window " +
+                    "means sending addresses the vendor CPS never writes. Doing exactly that copied " +
+                    "channel bank 0 over channel bank 1 on the test radio. See " +
+                    "docs/formats/d878uv-protocol.md \u00a75.5-\u00a75.6.\n" +
+                    "Reading, decoding and backup are unaffected and complete: " +
+                    $"plugmatic read --radio {def.Model}", 1);
+
             var source = LoadSource(def, pr.GetValue(plug), pr.GetValue(image));
             return await WriteFlow.RunAsync(def, new RunManager(), pr.GetValue(port), source, pr.GetValue(yes), ct);
         });

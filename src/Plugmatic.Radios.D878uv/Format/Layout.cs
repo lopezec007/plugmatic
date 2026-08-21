@@ -67,23 +67,6 @@ public static class Layout
     public static uint EraseBlockOf(uint address) => address & ~(EraseBlockSize - 1);
 
     /// <summary>
-    /// How many bytes of the erase block starting at `blockStart` the region table
-    /// describes. Anything less than <see cref="EraseBlockSize"/> means writing that block
-    /// would erase codeplug bytes this project has never read and cannot put back.
-    /// </summary>
-    public static long CoveredBytesInBlock(uint blockStart)
-    {
-        long end = (long)blockStart + EraseBlockSize, covered = 0;
-        foreach (var region in Regions)
-        {
-            long lo = Math.Max(region.Address, blockStart);
-            long hi = Math.Min(region.End, end);
-            if (hi > lo) covered += hi - lo;
-        }
-        return covered;
-    }
-
-    /// <summary>
     /// The radio keeps a 16-byte flash signature at the end of every 0x20000 half-block
     /// (`FF FF FF FF 22 33 44 55 FF FF FF FF 55 55 AA AA`). It is firmware-managed, not
     /// codeplug data: it is present in blocks Plugmatic has never written, and it is back
@@ -183,9 +166,35 @@ public static class Layout
         throw new D878FormatException($"Offset 0x{offset:X} is outside the packed image.");
     }
 
-    /// <summary>I8: a write is legal only fully inside one region. [format §5]</summary>
-    public static bool IsWritable(uint address, int length) =>
-        Regions.Any(r => address >= r.Address && address + (uint)length <= r.End);
+    /// <summary>
+    /// The erase blocks the codeplug occupies — every 0x40000 block that any region falls
+    /// in, whole or in part.
+    /// </summary>
+    public static readonly IReadOnlySet<uint> CodeplugEraseBlocks = BuildEraseBlocks();
+
+    private static HashSet<uint> BuildEraseBlocks()
+    {
+        var blocks = new HashSet<uint>();
+        foreach (var region in Regions)
+            for (uint b = EraseBlockOf(region.Address); b < region.End; b += EraseBlockSize)
+                blocks.Add(b);
+        return blocks;
+    }
+
+    /// <summary>
+    /// I8: a write is legal only fully inside an erase block the codeplug occupies.
+    ///
+    /// The bound is the *block*, not the region, because a write erases its whole block and
+    /// every byte of it has to be rewritten — including the inter-region gaps and unmodelled
+    /// records that share it. Anything outside those blocks (the callsign database, firmware,
+    /// calibration) stays refused. [format §5, d878uv-protocol.md §5.4]
+    /// </summary>
+    public static bool IsWritable(uint address, int length)
+    {
+        uint block = EraseBlockOf(address);
+        return CodeplugEraseBlocks.Contains(block)
+            && (ulong)address + (ulong)length <= (ulong)block + EraseBlockSize;
+    }
 
     public static (uint Address, int Offset) ChannelSlot(int index) =>
         Bank(ChannelBanks, BetweenChannelBanks, ChannelsPerBank, ChannelRecordSize, index);

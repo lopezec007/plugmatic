@@ -16,6 +16,7 @@ public static class DevCommands
         dev.Subcommands.Add(BuildIdentify());
         dev.Subcommands.Add(BuildDump());
         dev.Subcommands.Add(BuildPeek());
+        dev.Subcommands.Add(BuildRawDump());
         dev.Subcommands.Add(BuildWriteTest());
         dev.Subcommands.Add(BuildDecode());
         dev.Subcommands.Add(BuildDiffBin());
@@ -96,6 +97,87 @@ public static class DevCommands
             }
             catch (CliError e) { Console.Error.WriteLine(e.Message); return e.ExitCode; }
             catch (Exception e) { Console.Error.WriteLine($"dump failed: {e.Message}"); return 3; }
+            finally { runs.Finalize(run, outcome); }
+        });
+        return cmd;
+    }
+
+    // ---------------------------------------------------------------- rawdump
+
+    /// <summary>
+    /// Dump whole **erase blocks**, not the region table.
+    ///
+    /// A write erases 256 KB and reprograms only what the session staged, so the unit that
+    /// has to be checked for damage is the block — the region table sees a fraction of it
+    /// and would report "no change" over a crater. Two rawdumps either side of a write, run
+    /// through `dev diffbin`, are the evidence ladder step 4 actually calls for.
+    /// [d878uv-protocol.md §5.4/§5.6]
+    /// </summary>
+    private static Command BuildRawDump()
+    {
+        var port = PortOption();
+        var outOpt = new Option<string?>("--out") { Description = "Also copy rawdump.bin to this path" };
+        var blocksOpt = new Option<string?>("--blocks")
+        { Description = "Comma-separated block addresses (default: every block the codeplug occupies)" };
+        var cmd = new Command("rawdump", "Read whole erase blocks verbatim, for before/after damage checks");
+        cmd.Options.Add(port); cmd.Options.Add(outOpt); cmd.Options.Add(blocksOpt);
+        cmd.SetAction(async (pr, ct) =>
+        {
+            var radio = Common.Resolve("d878uv");
+            var all = Plugmatic.Radios.D878uv.Format.Layout.CodeplugEraseBlocks.OrderBy(b => b).ToList();
+            List<uint> blocks;
+            if (pr.GetValue(blocksOpt) is { } list && list.Trim().Length > 0)
+            {
+                blocks = [];
+                foreach (var piece in list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    uint value = Convert.ToUInt32(
+                        piece.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? piece[2..] : piece, 16);
+                    uint block = Plugmatic.Radios.D878uv.Format.Layout.EraseBlockOf(value);
+                    if (!all.Contains(block))
+                        throw new CliError($"0x{block:X8} is not an erase block the codeplug occupies.", 1);
+                    if (!blocks.Contains(block)) blocks.Add(block);
+                }
+                blocks.Sort();
+            }
+            else blocks = all;
+
+            var runs = new RunManager();
+            var run = runs.CreateRun(radio.Model, "dev");
+            Console.WriteLine($"Run: {run.Directory}");
+            var outcome = RunOutcome.Failed;
+            uint blockSize = Plugmatic.Radios.D878uv.Format.Layout.EraseBlockSize;
+            try
+            {
+                await using var session = await RadioSession.ReopenAsync(
+                    radio, pr.GetValue(port), run, TimeSpan.FromSeconds(60), ct);
+                await session.IdentifyAsync(ct);
+                var proto = (Plugmatic.Radios.D878uv.Protocol.D878uvProtocol)session.Protocol;
+
+                Console.WriteLine($"Dumping {blocks.Count} block(s) x 0x{blockSize:X} = " +
+                                  $"{blocks.Count * (long)blockSize / 1024} KB");
+                var image = new byte[blocks.Count * (long)blockSize];
+                for (int i = 0; i < blocks.Count; i++)
+                {
+                    var bytes = await proto.ReadRegionAsync(session.Link, blocks[i], (int)blockSize, null, "read", ct);
+                    bytes.CopyTo(image.AsSpan(i * (int)blockSize));
+                    Console.Write($"\r  {i + 1}/{blocks.Count} (0x{blocks[i]:X8})    ");
+                }
+                Console.WriteLine();
+
+                var path = run.WriteArtifact("rawdump.bin", image);
+                // The block order is what makes two dumps comparable; record it beside them.
+                run.WriteArtifact("rawdump.map",
+                    string.Join("\n", blocks.Select((b, i) =>
+                        $"0x{i * (long)blockSize:X8} 0x{b:X8}")) + "\n");
+                if (pr.GetValue(outOpt) is { } outPath) File.Copy(path, outPath, overwrite: true);
+                Console.WriteLine($"Wrote 0x{image.Length:X} bytes -> {path}");
+                Console.WriteLine("Compare two dumps with: plugmatic dev diffbin <a> <b>");
+                outcome = RunOutcome.Success;
+                return 0;
+            }
+            catch (CliError e) { Console.Error.WriteLine(e.Message); return e.ExitCode; }
+            catch (Exception e) { Console.Error.WriteLine($"rawdump failed: {e.Message}"); return 3; }
             finally { runs.Finalize(run, outcome); }
         });
         return cmd;
