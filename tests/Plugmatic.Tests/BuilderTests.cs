@@ -239,4 +239,66 @@ public class BuilderTests
         Assert.Equal(idBlockBefore, written.AsSpan(0x67000, 0x1000).ToArray());
         Assert.Equal(3121234u, codec.Decode(written).Settings.RadioId);
     }
+    // ------------------------------------------------------------ rx tone policy
+
+    /// <summary>
+    /// Two analog repeaters: one publishes a downlink tone that differs from its uplink,
+    /// one publishes none at all — the two cases the policy has to tell apart.
+    /// </summary>
+    private static List<Repeater> ToneRepeaters() =>
+    [
+        new Repeater
+        {
+            Callsign = "W0DIFF", Output = Frequency.FromMHz(145.130m), Input = Frequency.FromMHz(144.530m),
+            Mode = RepeaterMode.Fm,
+            UplinkTone = SelectiveCall.Ctcss(88.5m),
+            DownlinkTone = SelectiveCall.Ctcss(123.0m),
+            City = "Boulder", Lat = 40.0, Lon = -105.27, DistanceKm = 20,
+        },
+        new Repeater
+        {
+            Callsign = "W0NONE", Output = Frequency.FromMHz(145.150m), Input = Frequency.FromMHz(144.550m),
+            Mode = RepeaterMode.Fm,
+            UplinkTone = SelectiveCall.Ctcss(100.0m),
+            City = "Boulder", Lat = 40.0, Lon = -105.27, DistanceKm = 21,
+        },
+    ];
+
+    private static Codeplug BuildTones(RxTonePolicy policy)
+    {
+        var builder = new CodeplugBuilder(Caps, new GeneralSettings { RadioId = 3217632, Callsign = "TEST" });
+        var profile = BuildProfile.ColoradoDefault();
+        profile.RxTone = policy;
+        return builder.Build(ToneRepeaters(), profile, new GmrsPolicy(false, null)).Codeplug;
+    }
+
+    private static AnalogChannel Analog(Codeplug plug, string callsign) =>
+        plug.Channels.OfType<AnalogChannel>().First(c => c.Name.StartsWith(callsign, StringComparison.Ordinal));
+
+    [Fact]
+    public void Rx_tone_defaults_to_carrier_squelch()
+    {
+        Assert.Equal(RxTonePolicy.None, BuildProfile.ColoradoDefault().RxTone);
+
+        var plug = BuildTones(RxTonePolicy.None);
+        Assert.Equal(SelectiveCall.None, Analog(plug, "W0DIFF").RxTone);
+        Assert.Equal(SelectiveCall.None, Analog(plug, "W0NONE").RxTone);
+        Assert.Equal(SelectiveCall.Ctcss(88.5m), Analog(plug, "W0DIFF").TxTone);   // TX unaffected
+    }
+
+    [Fact]
+    public void Rx_tone_downlink_uses_the_published_downlink_never_the_uplink()
+    {
+        var plug = BuildTones(RxTonePolicy.Downlink);
+
+        // The distinction that matters: this repeater's downlink differs from its uplink.
+        Assert.Equal(SelectiveCall.Ctcss(123.0m), Analog(plug, "W0DIFF").RxTone);
+        Assert.Equal(SelectiveCall.Ctcss(88.5m), Analog(plug, "W0DIFF").TxTone);
+
+        // No published downlink: carrier squelch, rather than guessing the uplink and
+        // leaving the channel deaf.
+        Assert.Equal(SelectiveCall.None, Analog(plug, "W0NONE").RxTone);
+        Assert.Equal(SelectiveCall.Ctcss(100.0m), Analog(plug, "W0NONE").TxTone);
+    }
+
 }

@@ -10,6 +10,11 @@ gmrs: true                   # RX-only unless `plugmatic config gmrs-tx enable`
 noaa: true                   # NOAA WX zone, always RX-only
 namingTemplate: "{khz} {call}"
 maxTalkgroupsPerRepeater: 8
+rxTone: none                 # none = carrier squelch (default) | downlink = decode the
+                             # repeater's published downlink tone where it publishes one.
+                             # `none` is the safe default: a wrong RX tone fails silently
+                             # by leaving the channel deaf, and 35 of the 182 Colorado
+                             # repeaters publishing both tones use a different one each way.
 talkgroups:
   - { name: Local 2, id: 2, slot: 2 }
   - { name: Colorado, id: 3108, slot: 1 }

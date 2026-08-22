@@ -88,7 +88,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                     Power = PowerLevel.High,
                     WideBandwidth = true,
                     TxTone = r.UplinkTone,
-                    RxTone = SelectiveCall.None,   // carrier squelch RX by default
+                    RxTone = RxToneFor(profile, r),
                     Admit = AdmitCriterion.ChannelFree,
                 };
                 plug.Channels.Add(ch);
@@ -169,6 +169,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                     Power = PowerLevel.High,
                     WideBandwidth = true,
                     TxTone = r.UplinkTone,
+                    RxTone = RxToneFor(profile, r),
                     Admit = AdmitCriterion.ChannelFree,
                 };
                 plug.Channels.Add(ch);
@@ -327,6 +328,15 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
         plug.Contacts.Add(new Contact { Name = name, Type = CallType.Group, DmrId = tgId });
         return name;
     }
+
+    /// <summary>
+    /// RX tone squelch for one repeater. `downlink` uses the published downlink tone and
+    /// falls back to carrier squelch where the source has none — never the uplink tone,
+    /// which is a different tone on 35 of the 182 Colorado repeaters that publish both, and
+    /// guessing it wrong makes the channel deaf. [profile §6.3.2]
+    /// </summary>
+    private static SelectiveCall RxToneFor(BuildProfile profile, Repeater r) =>
+        profile.RxTone == RxTonePolicy.Downlink ? r.DownlinkTone : SelectiveCall.None;
 
     private Zone ZoneFor(Dictionary<string, Zone> zones, BuildProfile profile, Repeater r, bool digital)
     {

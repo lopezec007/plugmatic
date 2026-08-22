@@ -22,6 +22,25 @@ public enum ChannelNameStyle
     Frequency,
 }
 
+/// <summary>What, if anything, a generated analog channel decodes on receive.</summary>
+public enum RxTonePolicy
+{
+    /// <summary>
+    /// Carrier squelch: the channel opens on any signal. Default, and the safe one — an RX
+    /// tone that is wrong or stale fails *silently*, leaving a channel that looks fine and
+    /// hears nothing, whereas a wrong TX tone fails obviously by not opening the repeater.
+    /// It also keeps simplex traffic and stations the repeater is not encoding audible.
+    /// </summary>
+    None,
+
+    /// <summary>
+    /// Decode the repeater's published downlink tone (RepeaterBook "TSQ") where one exists;
+    /// channels without a published downlink stay on carrier squelch. Quieter, at the cost
+    /// of trusting third-party data for whether you hear anything at all.
+    /// </summary>
+    Downlink,
+}
+
 /// <summary>Build profile (profiles/*.yaml). [spec §6.3.2]</summary>
 public sealed class BuildProfile
 {
@@ -41,6 +60,8 @@ public sealed class BuildProfile
     public List<ProfileTalkgroup> Talkgroups { get; set; } = [];
     /// <summary>Cap DMR channels per repeater (talkgroup fan-out control).</summary>
     public int MaxTalkgroupsPerRepeater { get; set; } = 8;
+    /// <summary>RX tone squelch on analog channels: none (default) | downlink.</summary>
+    public RxTonePolicy RxTone { get; set; } = RxTonePolicy.None;
 
     public static BuildProfile Load(string path) =>
         new DeserializerBuilder()
