@@ -212,6 +212,23 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                 plug.Zones.Add(new Zone { Name = Fit($"{zone.Name} {part++}", 16), ChannelNames = [.. chunk] });
         }
 
+        // ---- zone order: GMRS, analog A-Z, digital A-Z, NOAA last ----
+        // Classify by what a zone actually holds rather than by its name suffix, so the
+        // order survives any change to zone naming.
+        var isDigital = new Dictionary<string, bool>(StringComparer.Ordinal);
+        foreach (var c in plug.Channels) isDigital[c.Name] = c is DigitalChannel;
+        int Rank(Zone z) =>
+            z.Name.StartsWith("GMRS", StringComparison.Ordinal) ? 0
+            : z.Name.StartsWith(CodeplugValidator.NoaaZoneName, StringComparison.Ordinal) ? 3
+            : z.ChannelNames.Any(n => isDigital.GetValueOrDefault(n)) ? 2
+            : 1;
+        plug.Zones.Sort((a, b) =>
+        {
+            int byRank = Rank(a).CompareTo(Rank(b));
+            return byRank != 0 ? byRank
+                 : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+        });
+
         BuildScanLists(plug, notes);
 
         if (plug.Channels.Count > profile.MaxChannels)

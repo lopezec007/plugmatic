@@ -52,6 +52,15 @@ public static class Layout
     public const uint RadioIdBitmap = 0x024C1320;
     public const uint RadioIds = 0x02580000;
     public const uint Settings = 0x02500000;
+    /// <summary>
+    /// Per-zone selected channel, as a **position in that zone's member list** (not a
+    /// channel index): 250 u16 for VFO A at +0, then 250 more for VFO B at +500. The radio
+    /// refuses a zone whose stored position is past the end of its member list — it shows
+    /// "No Valid Chan!" and locks the menu and zone controls until you leave. [format §4]
+    /// </summary>
+    public const uint ZoneCurrentChannel = 0x02500100;
+    /// <summary>Byte offset from <see cref="ZoneCurrentChannel"/> to the VFO B half.</summary>
+    public const int ZoneCurrentChannelVfoB = 500;
     public const uint SettingsExtension = 0x02501400;
 
     /// <summary>

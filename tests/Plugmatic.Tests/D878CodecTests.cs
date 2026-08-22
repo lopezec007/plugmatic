@@ -17,14 +17,38 @@ public class D878CodecTests
         return image is null ? null : File.ReadAllBytes(image);
     }
 
+    /// <summary>
+    /// Encoding is idempotent on a real image: whatever the first pass settles, a second
+    /// pass leaves alone. Stated this way rather than as strict byte-exactness because the
+    /// encoder deliberately repairs out-of-range zone selections — a value that stops the
+    /// radio resolving a channel at all — and this radio's own factory image contains one.
+    /// Any change beyond that region still fails the test below. [format §4]
+    /// </summary>
     [Fact]
-    public void Round_trip_of_the_real_radio_image_is_byte_exact()
+    public void Round_trip_of_the_real_radio_image_is_idempotent()
     {
         if (FactoryImage() is not { } image) return;    // skipped where no radio image is archived
         var codec = D878uvCodec.Instance;
-        var reEncoded = codec.Encode(codec.Decode(image), image);
-        var cmp = codec.Compare(image, reEncoded);
-        Assert.True(cmp.Equal, "round trip changed:\n  " + string.Join("\n  ", cmp.Differences.Take(20)));
+        var once = codec.Encode(codec.Decode(image), image);
+        var twice = codec.Encode(codec.Decode(once), once);
+        var cmp = codec.Compare(once, twice);
+        Assert.True(cmp.Equal, "round trip is not idempotent:\n  " + string.Join("\n  ", cmp.Differences.Take(20)));
+    }
+
+    /// <summary>The first pass may only touch the zone-selection table, and nothing else.</summary>
+    [Fact]
+    public void Round_trip_of_the_real_radio_image_changes_nothing_outside_zone_selections()
+    {
+        if (FactoryImage() is not { } image) return;
+        var codec = D878uvCodec.Instance;
+        var once = codec.Encode(codec.Decode(image), image);
+
+        int from = Layout.OffsetOf(Layout.ZoneCurrentChannel);
+        int to = from + 0x400;
+        for (int i = 0; i < image.Length; i++)
+            if (i < from || i >= to)
+                Assert.True(image[i] == once[i],
+                    $"round trip changed 0x{Layout.AddressOf(i):X8}, outside the zone-selection table");
     }
 
     [Fact]
@@ -73,8 +97,10 @@ public class D878CodecTests
     [Fact]
     public void Editing_one_field_rewrites_exactly_one_byte()
     {
-        if (FactoryImage() is not { } image) return;
+        if (FactoryImage() is not { } factory) return;
         var codec = D878uvCodec.Instance;
+        // Settle any zone-selection repair first, so this measures the edit and nothing else.
+        var image = codec.Encode(codec.Decode(factory), factory);
         var ir = codec.Decode(image);
         var target = ir.Channels.OfType<DigitalChannel>().First();
         int slot = ir.Channels.IndexOf(target);

@@ -98,6 +98,14 @@ public sealed class Zone
 {
     public string Name { get; set; } = "";
     public List<string> ChannelNames { get; set; } = [];
+
+    /// <summary>
+    /// Zone is present but not offered in the radio's zone selector. Modelled so a restore
+    /// preserves it and a generated plug shows every zone it defines — the flag lives in a
+    /// per-slot bitmap that outlives a codeplug replacement, so leaving it alone would hide
+    /// whichever new zone inherited a hidden slot. [d878uv-format.md §4]
+    /// </summary>
+    public bool Hidden { get; set; }
     /// <summary>See Channel.RawRecord.</summary>
     [YamlIgnore]
     public byte[]? RawRecord { get; set; }

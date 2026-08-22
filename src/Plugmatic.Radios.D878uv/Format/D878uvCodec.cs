@@ -293,6 +293,37 @@ public sealed class D878uvCodec : IRadioCodec
                 at += 2;
             }
             if (at + 1 < Layout.ZoneChannelListSize) SetU16IfChanged(list, at, 0xFFFF);
+
+            // Zone-adjacent state that outlives a codeplug replacement. An out-of-range
+            // position is repaired unconditionally, including on a restore: it is not a
+            // preference to preserve, it is a value that stops the radio resolving a channel
+            // at all. Doing this only when a zone's members changed is not enough — a slot
+            // can keep identical members while carrying a position stale from a plug two
+            // generations back, which is exactly how Firestone DMR and NOAA WX survived the
+            // first attempt at this fix.
+            ClampZoneSelection(image, slots[i], at / 2);
+            SetAllocated(image, Layout.HiddenZoneBitmap, slots[i], zone.Hidden, inverted: false);
+        }
+    }
+
+    /// <summary>
+    /// Keep a zone's selected-channel position inside its member list, for both VFOs.
+    ///
+    /// The position survives a codeplug replacement, so a slot that used to hold a 40-channel
+    /// zone leaves "channel 31" behind for whatever zone lands there next. Entering a zone
+    /// whose position is past the end gives "No Valid Chan!" and locks the menu and zone
+    /// controls — observed on hardware, 2026-08-22. A still-valid position is left alone so
+    /// the operator keeps their place. [format §4]
+    /// </summary>
+    private static void ClampZoneSelection(Span<byte> image, int slot, int memberCount)
+    {
+        int baseOffset = Layout.OffsetOf(Layout.ZoneCurrentChannel);
+        foreach (int half in new[] { 0, Layout.ZoneCurrentChannelVfoB })
+        {
+            int at = baseOffset + half + slot * 2;
+            ushort current = BinaryPrimitives.ReadUInt16LittleEndian(image[at..]);
+            if (current >= memberCount)
+                BinaryPrimitives.WriteUInt16LittleEndian(image[at..], 0);
         }
     }
 
@@ -553,7 +584,11 @@ public sealed class D878uvCodec : IRadioCodec
         {
             if (!Layout.BitmapHas(image, Layout.ZoneBitmap, i)) continue;
             var name = ReadName(image.Slice(Layout.ZoneNameOffset(i), Layout.ZoneNameSize));
-            var zone = new Zone { Name = name.Length > 0 ? name : $"Zone {i + 1}" };
+            var zone = new Zone
+            {
+                Name = name.Length > 0 ? name : $"Zone {i + 1}",
+                Hidden = Layout.BitmapHas(image, Layout.HiddenZoneBitmap, i),
+            };
             var list = image.Slice(Layout.ZoneChannelsOffset(i), Layout.ZoneChannelListSize);
             for (int n = 0; n < Layout.MaxChannelsPerZone; n++)
             {
