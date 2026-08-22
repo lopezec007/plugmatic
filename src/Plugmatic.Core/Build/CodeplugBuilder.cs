@@ -212,15 +212,10 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                 plug.Zones.Add(new Zone { Name = Fit($"{zone.Name} {part++}", 16), ChannelNames = [.. chunk] });
         }
 
-        // ---- zone order: GMRS, analog A-Z, digital A-Z, NOAA last ----
-        // Classify by what a zone actually holds rather than by its name suffix, so the
-        // order survives any change to zone naming.
-        var isDigital = new Dictionary<string, bool>(StringComparer.Ordinal);
-        foreach (var c in plug.Channels) isDigital[c.Name] = c is DigitalChannel;
+        // ---- zone order: GMRS, places A-Z, NOAA last; channels A-Z within each ----
         int Rank(Zone z) =>
             z.Name.StartsWith("GMRS", StringComparison.Ordinal) ? 0
-            : z.Name.StartsWith(CodeplugValidator.NoaaZoneName, StringComparison.Ordinal) ? 3
-            : z.ChannelNames.Any(n => isDigital.GetValueOrDefault(n)) ? 2
+            : z.Name.StartsWith(CodeplugValidator.NoaaZoneName, StringComparison.Ordinal) ? 2
             : 1;
         plug.Zones.Sort((a, b) =>
         {
@@ -228,6 +223,11 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
             return byRank != 0 ? byRank
                  : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
         });
+        // GMRS and NOAA keep their channels in service order (GMRS 1..22, WX1..WX7), which is
+        // the order anyone reads them in; everywhere else alphabetical is what makes a mixed
+        // analog/DMR zone navigable.
+        foreach (var zone in plug.Zones.Where(z => Rank(z) == 1))
+            zone.ChannelNames.Sort((a, b) => string.Compare(a, b, StringComparison.OrdinalIgnoreCase));
 
         BuildScanLists(plug, notes);
 
@@ -334,7 +334,10 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
         {
             "by-repeater" => Fit(r.Callsign, 16),
             "by-network" => digital ? "DMR" : "Analog",
-            _ => Fit(TitleCase(r.City ?? r.Callsign), digital ? 12 : 16) + (digital ? " DMR" : ""),
+            // One zone per place, holding both its analog and its DMR channels. Splitting
+            // them produced two entries per town in the zone selector — "Estes Park" and
+            // "Estes Park DMR" — with the pair separated by the whole alphabet.
+            _ => Fit(TitleCase(r.City ?? r.Callsign), 16),
         };
         return GetZone(zones, key);
     }
