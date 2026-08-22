@@ -77,7 +77,7 @@ present only if bit *i* of the channel bitmap is set (LSB-first within each byte
 | 0x00 | **RX frequency, 8-digit BCD, most-significant pair first, unit 10 Hz** | `44 63 25 00` = 44632500 → 446.325 MHz (**verified: hw**) |
 | 0x04 | **TX offset** magnitude, same BCD encoding; sign from the repeater-mode bits. On simplex channels it holds the TX frequency and is ignored | 445.200 rx + rpt=2 + 5.000 → TX 440.200 (**verified: hw**) |
 | 0x08 | bits 1–0 mode | 0 analog, 1 digital (2/3 = mixed variants) |
-| 0x08 | bits 3–2 power | 0 low … 3 turbo |
+| 0x08 | bits 3–2 power | 0 low, 1 medium, 2 high, **3 turbo — a distinct level, not a synonym for high** (**verified: hw** 2026-08-22, radio displayed Turbo on channels written as High) |
 | 0x08 | bits 5–4 bandwidth | 0 = 12.5 kHz, 1 = 25 kHz |
 | 0x08 | bits 7–6 repeater mode | 0 simplex, 1 TX = RX + offset, 2 TX = RX − offset |
 | 0x09 | bit 5 RX-only | the `TxPermit: Inhibited` mapping |

@@ -239,17 +239,12 @@ public sealed class D878uvCodec : IRadioCodec
             if (digitalNow != ch is DigitalChannel)
                 SetBitsIfChanged(rec, 0x08, 0, 2, ch is DigitalChannel ? 1 : 0);
 
-            var powerNow = (rec[0x08] >> 2 & 0x3) switch
-            {
-                0 => PowerLevel.Low,
-                1 => PowerLevel.Medium,
-                _ => PowerLevel.High,
-            };
+            // Turbo is its own level, not a synonym for High. Reading 3 as High made the two
+            // indistinguishable here, so a record inheriting Turbo from a previous codeplug
+            // was judged "already correct" and kept it — 25 channels on this radio.
+            var powerNow = (PowerLevel)(rec[0x08] >> 2 & 0x3);
             if (powerNow != ch.Power)
-                SetBitsIfChanged(rec, 0x08, 2, 2, ch.Power switch
-                {
-                    PowerLevel.Low => 0, PowerLevel.Medium => 1, _ => 2,
-                });
+                SetBitsIfChanged(rec, 0x08, 2, 2, (int)ch.Power);
 
             SetBitIfChanged(rec, 0x09, 5, ch.TxPermit == TxPermit.Inhibited);
             if (ch is AnalogChannel analog)
@@ -608,7 +603,7 @@ public sealed class D878uvCodec : IRadioCodec
         ch.RxFrequency = rx;
         ch.TxFrequency = tx;
         ch.TxPermit = (rec[0x09] >> 5 & 1) != 0 ? TxPermit.Inhibited : TxPermit.Allowed;
-        ch.Power = (rec[0x08] >> 2 & 0x3) switch { 0 => PowerLevel.Low, 1 => PowerLevel.Medium, _ => PowerLevel.High };
+        ch.Power = (PowerLevel)(rec[0x08] >> 2 & 0x3);      // 3 = Turbo, distinct from High
         ch.RawRecord = rec.ToArray();
         return ch;
     }

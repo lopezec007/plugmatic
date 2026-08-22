@@ -3,7 +3,13 @@ using YamlDotNet.Serialization;
 namespace Plugmatic.Core.Model;
 
 public enum TxPermit { Allowed, Inhibited }
-public enum PowerLevel { Low, Medium, High }
+/// <summary>
+/// Transmit power. `Turbo` is the AnyTone's fourth step above High; radios without it clamp
+/// to their maximum. Modelled rather than folded into High because folding made them
+/// indistinguishable on decode, so the encoder could not tell a Turbo record from a correct
+/// one and left 25 generated channels on Turbo. [d878uv-format.md §3]
+/// </summary>
+public enum PowerLevel { Low, Medium, High, Turbo }
 public enum CallType { Private, Group, All }
 public enum TimeSlot { TS1 = 1, TS2 = 2 }
 public enum AdmitCriterion { Always, ChannelFree, ToneOrColorCode }

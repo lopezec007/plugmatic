@@ -492,7 +492,7 @@ public sealed class Dm32uvCodec : IRadioCodec
         bool digital = ch is DigitalChannel;
         SetBits(rec, 0x18, 4, 4, digital ? 1 : 0);                           // type [format §4]
         SetBit(rec, 0x18, 3, ch.TxPermit == TxPermit.Inhibited);             // RX-only — the D-mapping
-        SetBits(rec, 0x18, 1, 2, (int)ch.Power);
+        SetBits(rec, 0x18, 1, 2, Math.Min((int)ch.Power, 2));   // no Turbo step on this radio
         SetBits(rec, 0x1C, 4, 4, Math.Clamp(ch.SquelchLevel, 0, 15));
 
         int sli = 0;

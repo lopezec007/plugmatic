@@ -186,3 +186,63 @@ public class D878DigitalToneTests
         Assert.Equal(2, ((DigitalChannel)Codec.Decode(image).Channels[0]).ColorCode);
     }
 }
+
+/// <summary>
+/// Turbo is a fourth power level, not a synonym for High. Reading 3 as High made them
+/// indistinguishable, so the encoder judged a record inheriting Turbo "already correct" and
+/// left it — 25 generated channels came out on Turbo. [format §3]
+/// </summary>
+public class D878PowerTests
+{
+    private static readonly Plugmatic.Radios.IRadioCodec Codec = D878uvCodec.Instance;
+
+    private static byte[] BlankBase()
+    {
+        var image = new byte[Layout.ImageSize];
+        Array.Fill(image, (byte)0xFF);
+        foreach (var name in new[] { "channelBitmap", "zoneBitmap", "scanListBitmap",
+                                     "radioIdBitmap", "hiddenZoneBitmap", "groupListBitmap" })
+        {
+            var region = Layout.Regions.First(r => r.Name == name);
+            image.AsSpan(Layout.OffsetOf(region.Address), region.Length).Clear();
+        }
+        return image;
+    }
+
+    private static Codeplug One(PowerLevel power) => new()
+    {
+        Channels =
+        {
+            new AnalogChannel
+            {
+                Name = "P", RxFrequency = Frequency.FromMHz(146.94m),
+                TxFrequency = Frequency.FromMHz(146.34m), Power = power,
+            },
+        },
+    };
+
+    [Theory]
+    [InlineData(PowerLevel.Low, 0)]
+    [InlineData(PowerLevel.Medium, 1)]
+    [InlineData(PowerLevel.High, 2)]
+    [InlineData(PowerLevel.Turbo, 3)]
+    public void Each_power_level_round_trips_to_its_own_encoding(PowerLevel power, int encoded)
+    {
+        var image = Codec.Encode(One(power), BlankBase());
+        var rec = image.AsSpan(Layout.ChannelSlot(0).Offset, Layout.ChannelRecordSize);
+        Assert.Equal(encoded, rec[0x08] >> 2 & 0x3);
+        Assert.Equal(power, Codec.Decode(image).Channels[0].Power);
+    }
+
+    [Fact]
+    public void A_channel_asking_for_High_overwrites_an_inherited_Turbo()
+    {
+        var basis = Codec.Encode(One(PowerLevel.Turbo), BlankBase());
+        Assert.Equal(3, basis.AsSpan(Layout.ChannelSlot(0).Offset, 0x40)[0x08] >> 2 & 0x3);
+
+        var image = Codec.Encode(One(PowerLevel.High), basis);
+
+        Assert.Equal(2, image.AsSpan(Layout.ChannelSlot(0).Offset, 0x40)[0x08] >> 2 & 0x3);
+        Assert.Equal(PowerLevel.High, Codec.Decode(image).Channels[0].Power);
+    }
+}
