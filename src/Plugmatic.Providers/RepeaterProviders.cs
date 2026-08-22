@@ -18,6 +18,29 @@ public sealed class ProviderFetcher(ProviderCache cache, bool offline, Func<Http
 
     public Dictionary<string, DateTime> FetchTimestamps { get; } = [];
 
+    /// <summary>
+    /// Turn a bare status code into something the operator can act on. RepeaterBook closed
+    /// its export API to unapproved clients on 2026-03-03, so a 401 here is policy, not a
+    /// bad request, and no amount of retrying changes it.
+    /// </summary>
+    private static string Explain(string provider, int status, string url, bool sentToken)
+    {
+        string basic = $"{provider}: HTTP {status} for {url}";
+        if (provider != "repeaterbook" || status is not (401 or 403)) return basic;
+
+        return basic + "\n" + (sentToken
+            ? "The token was rejected. RepeaterBook app-bound user tokens look like `rbuapp_…` " +
+              "and are minted per user, per approved application, at " +
+              "https://www.repeaterbook.com/user/api_apps.php — a RepeaterBook premium " +
+              "subscription on its own does not grant API access."
+            : "No token configured: plugmatic config set repeaterbook.token <rbuapp_…>")
+            + "\nSince 2026-03-03 the export API is restricted to approved clients. A " +
+              "client-side tool like plugmatic has to be an approved *distributed* " +
+              "application first; only then can users mint their own token for it from the " +
+              "API Apps dashboard. Access requests: https://www.repeaterbook.com/wiki/doku.php?id=api" +
+              "\nRead, write and backup do not need this — only fetch/build.";
+    }
+
     public async Task<string> GetAsync(string provider, string key, string url,
         (string Name, string Value)? header, CancellationToken ct)
     {
@@ -37,7 +60,7 @@ public sealed class ProviderFetcher(ProviderCache cache, bool offline, Func<Http
         if (header is { } h) req.Headers.TryAddWithoutValidation(h.Name, h.Value);
         using var resp = await http.SendAsync(req, ct);
         if (!resp.IsSuccessStatusCode)
-            throw new ProviderException($"{provider}: HTTP {(int)resp.StatusCode} for {url}");
+            throw new ProviderException(Explain(provider, (int)resp.StatusCode, url, header is not null));
         var body = await resp.Content.ReadAsStringAsync(ct);
         cache.Put(provider, key, body);
         FetchTimestamps[provider] = DateTime.UtcNow;
@@ -55,8 +78,13 @@ public static class RepeaterBook
         string url = gmrs
             ? $"https://www.repeaterbook.com/api/export.php?state={Uri.EscapeDataString(state)}&stype=gmrs"
             : $"https://www.repeaterbook.com/api/export.php?state={Uri.EscapeDataString(state)}";
+        // X-RB-App-Token is RepeaterBook's preferred and "more reliable" header for both
+        // token models; Authorization: Bearer is only supported "where the server path
+        // preserves the Authorization header". Distributed tools like this one use a
+        // per-user app-bound `rbuapp_` token, never a shared `app_` one. [RepeaterBook API
+        // wiki, Authentication, retrieved 2026-08-21]
         var body = await fetcher.GetAsync("repeaterbook", $"{kind}:{state}", url,
-            token is null ? null : ("Authorization", $"Bearer {token}"), ct);
+            token is null ? null : ("X-RB-App-Token", token), ct);
         return Parse(body, gmrs);
     }
 
