@@ -83,7 +83,7 @@ present only if bit *i* of the channel bitmap is set (LSB-first within each byte
 | 0x09 | bit 5 RX-only | the `TxPermit: Inhibited` mapping |
 | 0x0A | u8 TX CTCSS index | index into the radio's tone table, which **starts at 62.5 Hz** — 100.0 Hz is index **13**, not 12 (**verified: hw** 2026-08-22) |
 | 0x0B | u8 RX CTCSS index | |
-| 0x0C | u16 LE TX DCS code | |
+| 0x0C | u16 LE TX DCS code | low 9 bits = the octal code as an integer, bit 15 = inverted (**verified: hw** 2026-08-22 — raw 0x003B displayed as 073N; the inverted flag is untested) |
 | 0x0E | u16 LE RX DCS code | |
 | 0x14 | u32 LE TX contact index | into the contact table |
 | 0x18 | u8 radio-ID index | which of the 250 radio IDs transmits here |
@@ -201,6 +201,9 @@ them keeps the write surface small.
 | 2026-08-10 | Radio ID record (BCD, name at 0x05) → 3217632 | **verified** |
 | 2026-08-10 | Contact record (name 0x01, BCD ID 0x23, inverted bitmap) | **verified** |
 | 2026-08-10 | Scan-list and group-list records, channel→list indices | **verified** |
+| 2026-08-22 | CTCSS index table — **starts at 62.5 Hz**, 100.0 is index 13 | **verified** (radio displayed 97.4 on a channel written as index 12) |
+| 2026-08-22 | DCS code field — low 9 bits, octal as integer | **verified** (raw 0x003B → displayed 073N) |
+| 2026-08-22 | Channel record reserved bytes — only 0x1B/0x1C ever hold 0xFF | **verified** across all 84 factory records |
 | 2026-08-10 | **Byte stability: three full reads, identical (same MD5)** | **verified — no volatile regions**, so `Compare` needs no masks |
 | 2026-08-10 | **Round trip `Encode(Decode(img), img) == img` on the real image** | **verified byte-exact** |
 | — | Any write to the radio | not attempted; `SupportsWrite` stays false until the ladder runs |

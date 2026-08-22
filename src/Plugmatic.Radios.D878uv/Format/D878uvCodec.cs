@@ -719,9 +719,11 @@ internal static class ToneCodec
 
     /// <summary>
     /// signallingMode: 0 = none, 1 = CTCSS (index), 2 = DCS (code). Anything else is
-    /// treated as none. The CTCSS index table is hardware-verified (see above); the **DCS
-    /// bit layout is still VERIFY** — no channel in the reference codeplug uses DCS, so the
-    /// 9-bit octal code and the 0x8000 inverted flag remain unconfirmed against a display.
+    /// treated as none. Both tables are now hardware-verified: the CTCSS index against a
+    /// channel the radio displayed as 100.0 Hz, and the DCS 9-bit octal code against
+    /// `W0TX 825`, written as raw 0x003B and displayed by the radio as 073N.
+    /// (2026-08-22. The inverted flag at 0x8000 is still untested — no repeater in range
+    /// publishes an inverted code.)
     /// </summary>
     public static SelectiveCall Decode(int signallingMode, byte ctcssIndex, ushort dcsCode) => signallingMode switch
     {
