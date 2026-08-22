@@ -301,4 +301,61 @@ public class BuilderTests
         Assert.Equal(SelectiveCall.Ctcss(100.0m), Analog(plug, "W0NONE").TxTone);
     }
 
+    // ------------------------------------------------------------ zone splitting
+
+    /// <summary>Two repeaters in one town, each with enough talkgroups to force a split.</summary>
+    private static List<Repeater> CrowdedTown()
+    {
+        var list = new List<Repeater>();
+        foreach (var (call, mhz) in new[] { ("W0AAA", 448.100m), ("W0BBB", 448.200m) })
+            list.Add(new Repeater
+            {
+                Callsign = call, Output = Frequency.FromMHz(mhz),
+                Input = Frequency.FromMHz(mhz - 5m), Mode = RepeaterMode.Dmr, ColorCode = 1,
+                City = "Fort Collins", Lat = 40.57, Lon = -105.09, DistanceKm = 5,
+            });
+        return list;
+    }
+
+    private static Codeplug BuildCrowded(int maxPerZone)
+    {
+        var caps = Caps with { MaxChannelsPerZone = maxPerZone };
+        var builder = new CodeplugBuilder(caps, new GeneralSettings { RadioId = 3217632, Callsign = "T" });
+        return builder.Build(CrowdedTown(), BuildProfile.ColoradoDefault(),
+                             new GmrsPolicy(false, null)).Codeplug;
+    }
+
+    [Fact]
+    public void A_town_that_fits_stays_one_zone()
+    {
+        var plug = BuildCrowded(maxPerZone: 64);
+        Assert.Single(plug.Zones, z => z.Name.StartsWith("Fort", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_over_large_zone_splits_by_repeater_and_never_cuts_one_across_zones()
+    {
+        // Small enough that one repeater's talkgroups fit but two do not.
+        var plug = BuildCrowded(maxPerZone: 10);
+        var parts = plug.Zones.Where(z => z.Name.StartsWith("Fort", StringComparison.Ordinal)).ToList();
+        Assert.True(parts.Count >= 2, "expected the town to split");
+
+        foreach (var part in parts)
+            Assert.True(part.ChannelNames.Count <= 10, $"{part.Name} exceeds the zone limit");
+
+        // Every channel of a given repeater lands in exactly one part.
+        foreach (var call in new[] { "W0AAA", "W0BBB" })
+        {
+            Assert.Single(parts, p => p.ChannelNames.Any(n => n.StartsWith(call, StringComparison.Ordinal)));
+        }
+
+        // Parts are named for the repeater they start at, sharing one prefix so they sort
+        // together, and each name fits the radio's 16-character field.
+        Assert.All(parts, p => Assert.True(p.Name.Length <= 16, p.Name));
+        Assert.Contains(parts, p => p.Name.EndsWith("W0AAA", StringComparison.Ordinal));
+        Assert.Contains(parts, p => p.Name.EndsWith("W0BBB", StringComparison.Ordinal));
+        var prefixes = parts.Select(p => p.Name[..p.Name.LastIndexOf(' ')]).Distinct();
+        Assert.Single(prefixes);
+    }
+
 }

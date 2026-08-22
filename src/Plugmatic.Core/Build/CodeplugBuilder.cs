@@ -37,6 +37,9 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
         var plug = new Codeplug();
         var names = new HashSet<string>(StringComparer.Ordinal);
         var zones = new Dictionary<string, Zone>(StringComparer.Ordinal);
+        // Which repeater produced each channel. Used when a zone has to be split: a radio
+        // with small zones should still never cut one repeater's channels across two of them.
+        var sourceOf = new Dictionary<string, string>(StringComparer.Ordinal);
 
         // Operator identity: from injected settings, else config. Without a DMR ID, ALL DMR
         // channels are forced RX-only — an unidentified radio must not transmit digital.
@@ -92,6 +95,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                     Admit = AdmitCriterion.ChannelFree,
                 };
                 plug.Channels.Add(ch);
+                sourceOf[ch.Name] = r.Callsign;
                 ZoneFor(zones, profile, r, digital: false).ChannelNames.Add(ch.Name);
             }
 
@@ -117,6 +121,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                         RxGroupListName = plug.RxGroupLists.FirstOrDefault()?.Name,
                     };
                     plug.Channels.Add(ch);
+                    sourceOf[ch.Name] = r.Callsign;
                     ZoneFor(zones, profile, r, digital: true).ChannelNames.Add(ch.Name);
                 }
             }
@@ -200,7 +205,7 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
             }
         }
 
-        // ---- assemble zones (split at 64, drop empties) ----
+        // ---- assemble zones (split by repeater where the radio's limit forces it) ----
         foreach (var zone in zones.Values.Where(z => z.ChannelNames.Count > 0))
         {
             if (zone.ChannelNames.Count <= caps.MaxChannelsPerZone)
@@ -208,9 +213,8 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                 plug.Zones.Add(zone);
                 continue;
             }
-            int part = 1;
-            foreach (var chunk in zone.ChannelNames.Chunk(caps.MaxChannelsPerZone))
-                plug.Zones.Add(new Zone { Name = Fit($"{zone.Name} {part++}", 16), ChannelNames = [.. chunk] });
+            foreach (var part in SplitByRepeater(zone, sourceOf, caps.MaxChannelsPerZone, notes))
+                plug.Zones.Add(part);
         }
 
         // ---- zone order: GMRS, places A-Z, NOAA last; channels A-Z within each ----
@@ -327,6 +331,72 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
         if (plug.Contacts.Any(c => c.Name == name)) return name;
         plug.Contacts.Add(new Contact { Name = name, Type = CallType.Group, DmrId = tgId });
         return name;
+    }
+
+    /// <summary>
+    /// Split an over-large zone into parts that each fit the radio's limit.
+    ///
+    /// Parts are packed out of whole repeaters, so a repeater's channels are never cut
+    /// across two zones — on a radio with 64-channel zones, "Denver 1"/"Denver 2" otherwise
+    /// lands half of a repeater's talkgroups in each. Each part is named for the repeater it
+    /// starts at, so the split is something you can navigate rather than an arbitrary count.
+    /// A single repeater larger than the whole limit falls back to chunking, which cannot
+    /// happen with the profile's talkgroup cap but is not worth crashing over.
+    /// </summary>
+    private static List<Zone> SplitByRepeater(
+        Zone zone, Dictionary<string, string> sourceOf, int limit, List<string> notes)
+    {
+        // Group channels by their repeater, keeping the zone's existing (alphabetical) order.
+        var groups = new List<List<string>>();
+        foreach (var name in zone.ChannelNames)
+        {
+            string source = sourceOf.GetValueOrDefault(name, name);
+            if (groups.Count > 0 && sourceOf.GetValueOrDefault(groups[^1][0], groups[^1][0]) == source)
+                groups[^1].Add(name);
+            else
+                groups.Add([name]);
+        }
+
+        // Pack whole repeater groups, remembering which repeater each part starts at; the
+        // names are assigned afterwards so every part of a place shares one prefix.
+        var parts = new List<(string Call, List<string> Channels)>();
+        var current = new List<string>();
+        void Flush()
+        {
+            if (current.Count == 0) return;
+            parts.Add((sourceOf.GetValueOrDefault(current[0], ""), current));
+            current = [];
+        }
+
+        foreach (var group in groups)
+        {
+            if (group.Count > limit)
+            {
+                Flush();
+                foreach (var chunk in group.Chunk(limit)) parts.Add(("", [.. chunk]));
+                continue;
+            }
+            if (current.Count + group.Count > limit) Flush();
+            current.AddRange(group);
+        }
+        Flush();
+
+        // Trim the place to the same width for every part — sized by the longest callsign —
+        // so they share a prefix and stay together in an alphabetical zone list. Trimming per
+        // part instead gives "Fort Colli W0QEY" next to "Fort Coll KB0VGD".
+        int longest = parts.Max(p => p.Call.Length);
+        string place = longest == 0 ? zone.Name : Fit(zone.Name, Math.Max(1, 16 - longest - 1));
+        var named = parts
+            .Select((p, i) => new Zone
+            {
+                Name = Fit(p.Call.Length == 0 ? $"{zone.Name} {i + 1}" : $"{place} {p.Call}", 16),
+                ChannelNames = p.Channels,
+            })
+            .ToList();
+
+        notes.Add($"Zone '{zone.Name}' holds {zone.ChannelNames.Count} channels but this radio allows " +
+                  $"{limit}; split by repeater into {named.Count}: {string.Join(", ", named.Select(p => p.Name))}.");
+        return named;
     }
 
     /// <summary>
