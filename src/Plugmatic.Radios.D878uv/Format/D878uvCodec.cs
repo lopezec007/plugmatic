@@ -287,6 +287,14 @@ public sealed class D878uvCodec : IRadioCodec
             }
             if (ch is DigitalChannel digital)
             {
+                // CTCSS and DCS are analog-only. A slot that previously held an analog channel
+                // leaves its signalling mode and tone bytes behind, and nothing else clears
+                // them — which left DMR channels carrying a selected DCS code. The radio's own
+                // 39 digital records carry none of this, so clearing matches what it writes.
+                // Bit 5 of 0x09 is TX inhibit and is set elsewhere, so only bits 0-3 go.
+                SetBitsIfChanged(rec, 0x09, 0, 4, 0);
+                for (int at = 0x0A; at < 0x10; at++) if (rec[at] != 0) rec[at] = 0;
+
                 if (rec[0x20] != digital.ColorCode) rec[0x20] = (byte)digital.ColorCode;
                 SetBitIfChanged(rec, 0x21, 0, digital.TimeSlot == TimeSlot.TS2);
                 uint contactIdx = digital.TxContactName is { } tc && contacts.TryGetValue(tc, out int ci)

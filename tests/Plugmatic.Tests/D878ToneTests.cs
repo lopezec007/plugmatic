@@ -122,3 +122,67 @@ public class D878ToneTests
         Assert.Throws<D878FormatException>(() => Codec.Encode(ir, BlankBase()));
     }
 }
+
+/// <summary>
+/// CTCSS and DCS are analog-only. A digital channel written into a slot that used to hold
+/// an analog one inherited its signalling mode and tone bytes, leaving DMR channels
+/// carrying a selected DCS code. [format §3]
+/// </summary>
+public class D878DigitalToneTests
+{
+    private static readonly Plugmatic.Radios.IRadioCodec Codec = D878uvCodec.Instance;
+
+    private static byte[] BlankBase()
+    {
+        var image = new byte[Layout.ImageSize];
+        Array.Fill(image, (byte)0xFF);
+        foreach (var name in new[] { "channelBitmap", "zoneBitmap", "scanListBitmap",
+                                     "radioIdBitmap", "hiddenZoneBitmap", "groupListBitmap" })
+        {
+            var region = Layout.Regions.First(r => r.Name == name);
+            image.AsSpan(Layout.OffsetOf(region.Address), region.Length).Clear();
+        }
+        return image;
+    }
+
+    [Fact]
+    public void A_digital_channel_never_carries_analog_signalling()
+    {
+        // Start from an analog channel with both a tone and TX inhibit, then put a DMR
+        // channel in the same slot.
+        var analog = new Codeplug
+        {
+            Channels =
+            {
+                new AnalogChannel
+                {
+                    Name = "WAS ANALOG", RxFrequency = Frequency.FromMHz(146.94m),
+                    TxFrequency = Frequency.FromMHz(146.34m),
+                    TxTone = SelectiveCall.Parse("D073N"), RxTone = SelectiveCall.Ctcss(100.0m),
+                },
+            },
+        };
+        var basis = Codec.Encode(analog, BlankBase());
+
+        var digital = new Codeplug
+        {
+            Channels =
+            {
+                new DigitalChannel
+                {
+                    Name = "NOW DMR", RxFrequency = Frequency.FromMHz(446.9m),
+                    TxFrequency = Frequency.FromMHz(441.9m), ColorCode = 2,
+                    TimeSlot = TimeSlot.TS1, TxPermit = TxPermit.Inhibited,
+                },
+            },
+        };
+        var image = Codec.Encode(digital, basis);
+
+        var rec = image.AsSpan(Layout.ChannelSlot(0).Offset, Layout.ChannelRecordSize);
+        Assert.Equal(0, rec[0x09] & 0x0F);                    // no signalling mode selected
+        for (int at = 0x0A; at < 0x10; at++)
+            Assert.Equal(0, rec[at]);                         // no CTCSS index, no DCS code
+        Assert.Equal(0x20, rec[0x09] & 0x20);                 // TX inhibit survived
+        Assert.Equal(2, ((DigitalChannel)Codec.Decode(image).Channels[0]).ColorCode);
+    }
+}
