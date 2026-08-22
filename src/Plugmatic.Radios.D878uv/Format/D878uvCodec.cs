@@ -225,8 +225,39 @@ public sealed class D878uvCodec : IRadioCodec
                 });
 
             SetBitIfChanged(rec, 0x09, 5, ch.TxPermit == TxPermit.Inhibited);
-            if (ch is AnalogChannel analog && (rec[0x08] >> 4 & 0x3) != 0 != analog.WideBandwidth)
-                SetBitsIfChanged(rec, 0x08, 4, 2, analog.WideBandwidth ? 1 : 0);
+            if (ch is AnalogChannel analog)
+            {
+                if ((rec[0x08] >> 4 & 0x3) != 0 != analog.WideBandwidth)
+                    SetBitsIfChanged(rec, 0x08, 4, 2, analog.WideBandwidth ? 1 : 0);
+
+                // 0x09 bits 0-1 select the RX signalling mode and bits 2-3 the TX one; the
+                // CTCSS index and DCS code live in separate fields per direction and are only
+                // read when their mode selects them. Bit 5 of 0x09 is TX inhibit, set above,
+                // so only the mode bits are touched here. [format §3]
+                // Compare decoded-to-decoded, not byte-to-byte. A record whose mode bits say
+                // "none" can still carry stale CTCSS/DCS bytes that Decode ignores; rewriting
+                // them would churn bytes the radio does not read and break the byte-exact
+                // round trip over a factory image.
+                var currentTx = ToneCodec.Decode(rec[0x09] >> 2 & 0x3, rec[0x0A],
+                                                 BinaryPrimitives.ReadUInt16LittleEndian(rec[0x0C..]));
+                if (currentTx != analog.TxTone)
+                {
+                    var (txMode, txCtcss, txDcs) = ToneCodec.Encode(analog.TxTone);
+                    SetBitsIfChanged(rec, 0x09, 2, 2, txMode);
+                    if (rec[0x0A] != txCtcss) rec[0x0A] = txCtcss;
+                    SetU16IfChanged(rec, 0x0C, txDcs);
+                }
+
+                var currentRx = ToneCodec.Decode(rec[0x09] & 0x3, rec[0x0B],
+                                                 BinaryPrimitives.ReadUInt16LittleEndian(rec[0x0E..]));
+                if (currentRx != analog.RxTone)
+                {
+                    var (rxMode, rxCtcss, rxDcs) = ToneCodec.Encode(analog.RxTone);
+                    SetBitsIfChanged(rec, 0x09, 0, 2, rxMode);
+                    if (rec[0x0B] != rxCtcss) rec[0x0B] = rxCtcss;
+                    SetU16IfChanged(rec, 0x0E, rxDcs);
+                }
+            }
             if (ch is DigitalChannel digital)
             {
                 if (rec[0x20] != digital.ColorCode) rec[0x20] = (byte)digital.ColorCode;
@@ -619,4 +650,28 @@ internal static class ToneCodec
             $"D{Convert.ToString(dcsCode & 0x01FF, 8).PadLeft(3, '0')}{((dcsCode & 0x8000) != 0 ? "I" : "N")}"),
         _ => SelectiveCall.None,
     };
+
+    /// <summary>
+    /// Inverse of <see cref="Decode"/>. A tone-less channel is written the way the radio's
+    /// own records carry it — mode 0 with both tone fields zeroed, as the factory codeplug
+    /// does — rather than with an 0xFFFF filler.
+    /// </summary>
+    public static (int Mode, byte CtcssIndex, ushort Dcs) Encode(SelectiveCall call)
+    {
+        switch (call.Kind)
+        {
+            case ToneKind.Ctcss:
+                int index = Array.IndexOf(CtcssTenths, call.Value);
+                if (index < 0)
+                    throw new D878FormatException(
+                        $"CTCSS {call} is not one of the radio's {CtcssTenths.Length} standard tones.");
+                return (1, (byte)index, 0);
+            case ToneKind.Dcs:
+                if (call.Value is < 0 or > 0x01FF)
+                    throw new D878FormatException($"DCS code {call} does not fit the radio's 9-bit field.");
+                return (2, 0, (ushort)(call.Value | (call.Inverted ? 0x8000 : 0)));
+            default:
+                return (0, 0, 0);
+        }
+    }
 }

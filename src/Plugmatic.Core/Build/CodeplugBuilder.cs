@@ -139,6 +139,13 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                     PowerLevel.High, wide: true);              // 50 W class -> radio max
 
             var gmrsRepeaters = ordered.Where(r => r.Service == RepeaterService.Gmrs).ToList();
+            // Two GMRS repeaters on the same channel with the same uplink tone are the same
+            // channel as far as the radio is concerned — identical RX, TX and selector. The
+            // list is distance-ordered, so the first one wins and the rest are noted. Without
+            // this the validator rejects the whole plug for duplicate channels, which is what
+            // RepeaterBook's Colorado GMRS data (several tone-less entries on R20/R21, some
+            // with blank callsigns) actually produces.
+            var gmrsSeen = new HashSet<(ulong Hz, string Tone)>();
             foreach (var r in gmrsRepeaters)
             {
                 var main = GmrsMain.FirstOrDefault(m => Frequency.FromMHz(m.MHz).Hz == r.Output.Hz);
@@ -147,9 +154,15 @@ public sealed class CodeplugBuilder(RadioCapabilities caps, GeneralSettings? set
                     notes.Add($"GMRS repeater {r.Callsign} output {r.Output} not a GMRS main channel; skipped.");
                     continue;
                 }
+                if (!gmrsSeen.Add((r.Output.Hz, r.UplinkTone.ToString())))
+                {
+                    notes.Add($"GMRS R{main.Num} {r.Callsign}: another repeater already uses that " +
+                              "channel and tone; skipped as a duplicate.");
+                    continue;
+                }
                 var ch = new AnalogChannel
                 {
-                    Name = Unique($"GMRS R{main.Num} {r.Callsign}", names, r),
+                    Name = Unique($"GMRS R{main.Num} {r.Callsign}".TrimEnd(), names, r),
                     RxFrequency = r.Output,
                     TxFrequency = r.Output + 5_000_000,        // +5.000 MHz repeater input [spec §6.3.3]
                     TxPermit = gmrs.TxEnabled ? TxPermit.Allowed : TxPermit.Inhibited,

@@ -41,6 +41,28 @@ public sealed class ProviderFetcher(ProviderCache cache, bool offline, Func<Http
               "\nRead, write and backup do not need this — only fetch/build.";
     }
 
+    /// <summary>
+    /// Cache-aware fetch for payloads that do not come from our own HttpClient — currently
+    /// the approved RepeaterBook Python client. Same cache and `--offline` rules as GetAsync.
+    /// </summary>
+    public async Task<string> ProduceAsync(string provider, string key, Func<CancellationToken, Task<string>> produce,
+        CancellationToken ct)
+    {
+        var cached = cache.Get(provider, key, ignoreTtl: offline);
+        if (cached is { } hit)
+        {
+            FetchTimestamps[provider] = hit.FetchedUtc;
+            return hit.Body;
+        }
+        if (offline)
+            throw new ProviderException($"--offline and no cached {provider} data for '{key}'. Run once online first.");
+
+        var body = await produce(ct);
+        cache.Put(provider, key, body);
+        FetchTimestamps[provider] = DateTime.UtcNow;
+        return body;
+    }
+
     public async Task<string> GetAsync(string provider, string key, string url,
         (string Name, string Value)? header, CancellationToken ct)
     {
@@ -78,11 +100,17 @@ public static class RepeaterBook
         string url = gmrs
             ? $"https://www.repeaterbook.com/api/export.php?state={Uri.EscapeDataString(state)}&stype=gmrs"
             : $"https://www.repeaterbook.com/api/export.php?state={Uri.EscapeDataString(state)}";
-        // X-RB-App-Token is RepeaterBook's preferred and "more reliable" header for both
-        // token models; Authorization: Bearer is only supported "where the server path
-        // preserves the Authorization header". Distributed tools like this one use a
-        // per-user app-bound `rbuapp_` token, never a shared `app_` one. [RepeaterBook API
-        // wiki, Authentication, retrieved 2026-08-21]
+        // Preferred route: the approved `repeaterbook` client, which is the only thing a
+        // per-user `rbuapp_` token authenticates. Our own HttpClient is not the approved
+        // application and is refused with `auth_missing` whatever header carries the token,
+        // so the direct call below survives only for a future approved-app token.
+        if (RepeaterBookBridge.Discover() is { } tooling)
+            return Parse(await fetcher.ProduceAsync("repeaterbook", $"{kind}:{state}",
+                c => RepeaterBookBridge.FetchAsync(tooling, state, gmrs, c), ct), gmrs);
+
+        // X-RB-App-Token is RepeaterBook's preferred header for both token models;
+        // Authorization: Bearer is only supported "where the server path preserves the
+        // Authorization header". [RepeaterBook API wiki, Authentication, retrieved 2026-08-21]
         var body = await fetcher.GetAsync("repeaterbook", $"{kind}:{state}", url,
             token is null ? null : ("X-RB-App-Token", token), ct);
         return Parse(body, gmrs);

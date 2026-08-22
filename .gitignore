@@ -10,3 +10,11 @@ TestResults/
 *.pcapng
 *.pcapng.gz
 __pycache__/
+
+# Secrets: RepeaterBook user tokens and the like. Never commit, even to a private repo.
+.env
+.env.*
+!.env.example
+
+# Local Python venv for the approved RepeaterBook client
+.venv/
