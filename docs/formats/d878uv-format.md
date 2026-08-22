@@ -81,7 +81,7 @@ present only if bit *i* of the channel bitmap is set (LSB-first within each byte
 | 0x08 | bits 5–4 bandwidth | 0 = 12.5 kHz, 1 = 25 kHz |
 | 0x08 | bits 7–6 repeater mode | 0 simplex, 1 TX = RX + offset, 2 TX = RX − offset |
 | 0x09 | bit 5 RX-only | the `TxPermit: Inhibited` mapping |
-| 0x0A | u8 TX CTCSS index | index into the standard tone table |
+| 0x0A | u8 TX CTCSS index | index into the radio's tone table, which **starts at 62.5 Hz** — 100.0 Hz is index **13**, not 12 (**verified: hw** 2026-08-22) |
 | 0x0B | u8 RX CTCSS index | |
 | 0x0C | u16 LE TX DCS code | |
 | 0x0E | u16 LE RX DCS code | |

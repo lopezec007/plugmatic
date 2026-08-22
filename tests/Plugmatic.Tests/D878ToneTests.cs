@@ -47,7 +47,7 @@ public class D878ToneTests
     {
         decimal[] tones =
         [
-            67.0m, 69.3m, 71.9m, 74.4m, 77.0m, 79.7m, 82.5m, 85.4m, 88.5m, 91.5m, 94.8m,
+            62.5m, 67.0m, 69.3m, 71.9m, 74.4m, 77.0m, 79.7m, 82.5m, 85.4m, 88.5m, 91.5m, 94.8m,
             97.4m, 100.0m, 103.5m, 107.2m, 110.9m, 114.8m, 118.8m, 123.0m, 127.3m, 131.8m,
             136.5m, 141.3m, 146.2m, 151.4m, 156.7m, 159.8m, 162.2m, 165.5m, 167.9m, 171.3m,
             173.8m, 177.3m, 179.9m, 183.5m, 186.2m, 189.9m, 192.8m, 196.6m, 199.5m, 203.5m,
@@ -60,6 +60,24 @@ public class D878ToneTests
             Assert.Equal(SelectiveCall.Ctcss(hz), back.TxTone);
             Assert.Equal(SelectiveCall.Ctcss(hz), back.RxTone);
         }
+    }
+
+    /// <summary>
+    /// The exact mapping the radio showed us. Reading the table as the standard 50-tone set
+    /// (index 12 = 100.0) put every analog channel one tone low on hardware. [format §3]
+    /// </summary>
+    [Theory]
+    [InlineData(12, "97.4")]
+    [InlineData(13, "100.0")]
+    [InlineData(0, "62.5")]
+    public void The_ctcss_index_table_matches_what_the_radio_displays(int index, string expected)
+    {
+        var ir = OneChannel(SelectiveCall.Parse(expected), SelectiveCall.None);
+        var image = Codec.Encode(ir, BlankBase());
+        var rec = image.AsSpan(Layout.ChannelSlot(0).Offset, Layout.ChannelRecordSize);
+        Assert.Equal(index, rec[0x0A]);                       // TX CTCSS index byte
+        var back = (AnalogChannel)Codec.Decode(image).Channels[0];
+        Assert.Equal(expected, back.TxTone.ToString());
     }
 
     [Theory]

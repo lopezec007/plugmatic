@@ -691,9 +691,18 @@ public sealed class D878uvCodec : IRadioCodec
 /// <summary>CTCSS/DCS decoding for AnyTone channel records. [format §3]</summary>
 internal static class ToneCodec
 {
-    /// <summary>Standard CTCSS table, tenths of Hz — index order used by the channel record.</summary>
+    /// <summary>
+    /// The radio's CTCSS table, tenths of Hz, in the index order the channel record uses.
+    ///
+    /// **Starts at 62.5 Hz**, not 67.0. The list is otherwise the standard 50-tone extended
+    /// set, and reading it as that set — index 12 = 100.0 — put every generated analog
+    /// channel one tone low: the radio displayed 97.4 Hz on a channel written as 100.0.
+    /// With 62.5 leading, index 12 is 97.4 and 100.0 is index 13, which matches the radio.
+    /// (hw-verified 2026-08-22, W0QEY on this unit; supersedes the qdmr-derived table.)
+    /// </summary>
     private static readonly int[] CtcssTenths =
     [
+        625,
         670, 693, 719, 744, 770, 797, 825, 854, 885, 915, 948, 974, 1000, 1035, 1072, 1109,
         1148, 1188, 1230, 1273, 1318, 1365, 1413, 1462, 1514, 1567, 1598, 1622, 1655, 1679,
         1713, 1738, 1773, 1799, 1835, 1862, 1899, 1928, 1966, 1995, 2035, 2065, 2107, 2181,
@@ -702,8 +711,9 @@ internal static class ToneCodec
 
     /// <summary>
     /// signallingMode: 0 = none, 1 = CTCSS (index), 2 = DCS (code). Anything else is
-    /// treated as none. **VERIFY** — no channel in the reference codeplug uses a tone,
-    /// so the CTCSS index table and the DCS bit layout are still unconfirmed.
+    /// treated as none. The CTCSS index table is hardware-verified (see above); the **DCS
+    /// bit layout is still VERIFY** — no channel in the reference codeplug uses DCS, so the
+    /// 9-bit octal code and the 0x8000 inverted flag remain unconfirmed against a display.
     /// </summary>
     public static SelectiveCall Decode(int signallingMode, byte ctcssIndex, ushort dcsCode) => signallingMode switch
     {
