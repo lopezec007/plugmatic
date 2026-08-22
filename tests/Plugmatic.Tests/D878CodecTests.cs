@@ -6,7 +6,7 @@ namespace Plugmatic.Tests;
 public class D878CodecTests
 {
     /// <summary>The real radio image, when present, is the strongest available fixture.</summary>
-    private static byte[]? FactoryImage()
+    internal static byte[]? FactoryImage()
     {
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                "Plugmatic", "radios", "d878uv");

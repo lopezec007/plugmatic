@@ -176,6 +176,21 @@ public sealed class D878uvCodec : IRadioCodec
         return byName;
     }
 
+    /// <summary>
+    /// True when a channel record is erased flash rather than a channel.
+    ///
+    /// Only the scan-list and group-list indices legitimately hold 0xFF — their "none"
+    /// sentinel. Every other byte of every one of the 84 records in this radio's own
+    /// codeplug is something else, so 0xFF outside those two positions means the slot has
+    /// never been written. [format §3, hw-verified 2026-08-22]
+    /// </summary>
+    internal static bool IsUninitialisedRecord(ReadOnlySpan<byte> rec)
+    {
+        for (int at = 0; at < rec.Length; at++)
+            if (rec[at] == 0xFF && at is not (0x1B or 0x1C)) return true;
+        return false;
+    }
+
     private static void EncodeChannels(Span<byte> image, Codeplug ir, int[] slots,
         Dictionary<string, int> contacts, Dictionary<string, int> scanLists, Dictionary<string, int> groupLists)
     {
@@ -184,6 +199,18 @@ public sealed class D878uvCodec : IRadioCodec
             var ch = ir.Channels[i];
             var (_, offset) = Layout.ChannelSlot(slots[i]);
             var rec = image.Slice(offset, Layout.ChannelRecordSize);
+
+            // A slot that has never held a channel is erased flash, not a record: every field
+            // this codec does not model reads 0xFF, including flags the radio acts on. That is
+            // how generated channels ended up starting a scan the moment they were selected —
+            // the whole reserved area was 0xFF. Reset to the radio's own defaults first, so
+            // what the IR does not set is what the radio itself would have written.
+            if (IsUninitialisedRecord(rec))
+            {
+                rec.Clear();
+                rec[0x1B] = 0xFF;                    // scan list: none
+                rec[0x1C] = 0xFF;                    // RX group list: none
+            }
 
             if (DecodeBcdFrequency(rec).Hz != ch.RxFrequency.Hz) EncodeBcdFrequency(rec, ch.RxFrequency);
 
